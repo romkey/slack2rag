@@ -1,0 +1,6 @@
+slack-sdk>=3.27.0
+qdrant-client>=1.9.0
+sentence-transformers>=3.0.0
+openai>=1.35.0
+python-dotenv>=1.0.0
+tenacity>=8.3.0
