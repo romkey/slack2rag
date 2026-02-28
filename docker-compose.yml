@@ -27,8 +27,28 @@ services:
       QDRANT_URL: http://qdrant:6333
     volumes:
       - slack2rag_state:/data
-      - model_cache:/root/.cache/huggingface
+      - model_cache:/app/hf_cache
     restart: unless-stopped
+
+  # One-shot query tool — not started by default.
+  # Usage:
+  #   docker compose run --rm query "how do I reset my password?"
+  #   docker compose run --rm query --limit 10 --channel engineering "deploy process"
+  #   docker compose run --rm query --date-from 2024-06-01 "incident postmortem"
+  query:
+    image: ${IMAGE:-}
+    build: .
+    profiles: [query]
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - model_cache:/app/hf_cache
+    entrypoint: ["python", "-m", "src.query"]
 
 volumes:
   qdrant_data:

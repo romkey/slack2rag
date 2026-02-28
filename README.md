@@ -83,6 +83,41 @@ All configuration is via environment variables (or `.env`).
 
 ---
 
+## Querying from the command line
+
+A built-in CLI tool is included in the image:
+
+```bash
+# basic search
+docker compose run --rm query "how do I reset my password?"
+
+# limit results
+docker compose run --rm query --limit 10 "deploy process"
+
+# filter by channel
+docker compose run --rm query --channel engineering "incident postmortem"
+
+# filter by date range
+docker compose run --rm query --date-from 2024-06-01 --date-to 2024-06-30 "outage"
+
+# hide relevance score bars
+docker compose run --rm query --no-score "onboarding"
+```
+
+Example output:
+```
+Searching for: "how do I reset my password?"
+
+Top 3 of 14,823 indexed messages
+
+#1  #it-help  2024-03-12  @alice  [2 replies]  ████████████████░░░░  0.891
+────────────────────────────────────────────────────────────────────────────
+  [alice]: To reset your password go to /account/settings and click "Forgot
+  password". You'll get an email within a few minutes.
+```
+
+---
+
 ## Querying from another application
 
 Qdrant exposes a REST API on port **6333** (and gRPC on 6334).
@@ -99,14 +134,14 @@ client = QdrantClient("http://localhost:6333")
 query = "how do I set up SSO?"
 vector = model.encode([query], normalize_embeddings=True)[0].tolist()
 
-results = client.search(
+response = client.query_points(
     collection_name="slack_messages",
-    query_vector=vector,
+    query=vector,
     limit=5,
     with_payload=True,
 )
 
-for hit in results:
+for hit in response.points:
     p = hit.payload
     print(f"[{p['date']}] #{p['channel_name']}  {p['user_name']}")
     print(p["text"])
@@ -118,9 +153,9 @@ for hit in results:
 ```python
 from qdrant_client.http import models
 
-results = client.search(
+response = client.query_points(
     collection_name="slack_messages",
-    query_vector=vector,
+    query=vector,
     limit=10,
     query_filter=models.Filter(
         must=[
@@ -129,6 +164,7 @@ results = client.search(
         ]
     ),
 )
+# results are in response.points
 ```
 
 ### REST (curl)

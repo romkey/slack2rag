@@ -125,9 +125,9 @@ class VectorStore:
 
         query_filter = qmodels.Filter(must=conditions) if conditions else None
 
-        hits = self._client.search(
+        response = self._client.query_points(
             collection_name=self._collection,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             query_filter=query_filter,
             with_payload=True,
@@ -135,8 +135,11 @@ class VectorStore:
 
         return [
             {"score": hit.score, **hit.payload}
-            for hit in hits
+            for hit in response.points
         ]
 
     def count(self) -> int:
-        return self._client.count(collection_name=self._collection).count
+        # vectors_count is Optional[int] and may be None in newer qdrant-client
+        # versions; fall back to points_count, then 0.
+        result = self._client.count(collection_name=self._collection)
+        return getattr(result, "count", None) or getattr(result, "points_count", None) or 0
