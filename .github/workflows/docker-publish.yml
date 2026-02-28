@@ -5,8 +5,6 @@ on:
     branches:
       - main
       - master
-    tags:
-      - "v*"
   pull_request:
     branches:
       - main
@@ -52,9 +50,6 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
             # tag :latest on pushes to the default branch
             type=raw,value=latest,enable={{is_default_branch}}
-            # tag :vX.Y.Z on semver tags
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             # tag :sha-<short> on every push
             type=sha
 
