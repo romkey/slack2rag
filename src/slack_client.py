@@ -75,6 +75,20 @@ class SlackClient:
         logger.info("Found %d channels to index", len(channels))
         return channels
 
+    def _join_channel(self, channel_id: str) -> bool:
+        """Auto-join a public channel. Requires the channels:join scope."""
+        try:
+            self._client.conversations_join(channel=channel_id)
+            logger.info("Joined channel %s", channel_id)
+            return True
+        except SlackApiError as exc:
+            logger.warning(
+                "Could not join channel %s: %s  (add channels:join scope to your Slack app)",
+                channel_id,
+                exc.response["error"],
+            )
+            return False
+
     # ── messages ──────────────────────────────────────────────────────────────
 
     def get_channel_messages(
@@ -102,7 +116,9 @@ class SlackClient:
             except SlackApiError as exc:
                 error = exc.response["error"]
                 if error == "not_in_channel":
-                    logger.warning("Bot is not in channel %s — skipping", channel_id)
+                    if self._join_channel(channel_id):
+                        continue  # retry after joining
+                    return
                 else:
                     logger.error("conversations.history error for %s: %s", channel_id, error)
                 return

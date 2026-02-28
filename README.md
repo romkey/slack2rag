@@ -25,6 +25,7 @@ The Qdrant service is the reusable component — any application that can make H
    |---|---|
    | `channels:read` | list public channels |
    | `channels:history` | read messages |
+   | `channels:join` | auto-join public channels (no manual `/invite` needed) |
    | `users:read` | resolve user mentions to names |
 3. Install the app to your workspace and copy the **Bot User OAuth Token**.
 4. Invite the bot to any private channels you also want indexed:
