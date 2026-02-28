@@ -48,7 +48,7 @@ services:
       QDRANT_URL: http://qdrant:6333
     volumes:
       - model_cache:/app/hf_cache
-    entrypoint: ["python", "-m", "src.query"]
+    command: ["python", "-m", "src.query"]
 
 volumes:
   qdrant_data:

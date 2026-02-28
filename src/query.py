@@ -52,10 +52,13 @@ def _print_result(idx: int, hit: dict, show_score: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from . import __version__
+
     parser = argparse.ArgumentParser(
         prog="query",
         description="Semantic search over indexed Slack messages.",
     )
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "query",
         nargs="+",

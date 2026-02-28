@@ -121,7 +121,8 @@ def run_once(cfg: Config, slack: SlackClient, store: VectorStore, embedder: Embe
 def main() -> None:
     cfg = Config.from_env()
 
-    logger.info("Starting slack2rag")
+    from . import __version__
+    logger.info("Starting slack2rag v%s", __version__)
     logger.info("  Qdrant:     %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
     logger.info("  Embeddings: %s", cfg.embedding_provider)
     logger.info("  Channels:   %s", cfg.channel_list or "all public")
