@@ -57,19 +57,10 @@ IMAGE=ghcr.io/<owner>/slack2rag:latest docker compose up
 ```bash
 cp .env.example .env
 # Edit .env and set SLACK_BOT_TOKEN
-
-# Build the image
-docker compose build
-
-# Download the embedding model into the cache volume (one-time)
-docker compose run --rm slack2rag python -c \
-  "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-
-# Start the indexer
-docker compose up
+docker compose up --build
 ```
 
-The model download is a one-time step — it's saved in the `model_cache` Docker volume and reused on every subsequent run.  Syncs after the first are incremental.
+The first run downloads the embedding model (~90 MB for the default `all-MiniLM-L6-v2`) and indexes all accessible public channels.  Subsequent runs are incremental.
 
 ---
 
