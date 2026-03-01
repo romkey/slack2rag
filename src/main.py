@@ -128,7 +128,8 @@ def main() -> None:
     logger.info("  Channels:   %s", cfg.channel_list or "all public")
     logger.info("  Run once:   %s", cfg.run_once)
 
-    slack = SlackClient(cfg.slack_bot_token)
+    slack = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause)
+    slack.prefetch_users()
     embedder = Embedder(
         provider=cfg.embedding_provider,
         local_model=cfg.local_embedding_model,

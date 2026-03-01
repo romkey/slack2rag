@@ -1,12 +1,12 @@
 """
 Thin wrapper around the Slack Web API.
 
-Handles pagination, rate-limit retries (via slack-sdk's built-in handler),
-and user-name caching.
+Handles pagination, rate-limit back-off, and user-name caching.
 """
 
 import logging
 import re
+import time
 from typing import Dict, Generator, List, Optional
 
 from slack_sdk import WebClient
@@ -19,12 +19,21 @@ _CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)\|([^>]*)>")
 _URL_RE = re.compile(r"<(https?://[^|>]+)(?:\|([^>]*))?>" )
 _SPECIAL_RE = re.compile(r"<!(here|channel|everyone)>")
 
+# Slack free-plan Tier 3/4 methods allow ~50 req/min.  A 1.2 s pause
+# between calls keeps us under that without stalling too long.
+DEFAULT_API_PAUSE = 1.2
+
 
 class SlackClient:
-    def __init__(self, token: str) -> None:
-        # slack-sdk automatically retries on HTTP 429 (rate limited)
+    def __init__(self, token: str, api_pause: float = DEFAULT_API_PAUSE) -> None:
         self._client = WebClient(token=token)
         self._user_cache: Dict[str, str] = {}
+        self._api_pause = api_pause
+
+    def _pace(self) -> None:
+        """Sleep between API calls to stay under Slack's rate limits."""
+        if self._api_pause > 0:
+            time.sleep(self._api_pause)
 
     # ── channels ──────────────────────────────────────────────────────────────
 
@@ -49,6 +58,7 @@ class SlackClient:
 
             try:
                 resp = self._client.conversations_list(**kwargs)
+                self._pace()
             except SlackApiError as exc:
                 logger.error("conversations.list error: %s", exc.response["error"])
                 break
@@ -79,6 +89,7 @@ class SlackClient:
         """Auto-join a public channel. Requires the channels:join scope."""
         try:
             self._client.conversations_join(channel=channel_id)
+            self._pace()
             logger.info("Joined channel %s", channel_id)
             return True
         except SlackApiError as exc:
@@ -113,6 +124,7 @@ class SlackClient:
 
             try:
                 resp = self._client.conversations_history(**kwargs)
+                self._pace()
             except SlackApiError as exc:
                 error = exc.response["error"]
                 if error == "not_in_channel":
@@ -146,6 +158,7 @@ class SlackClient:
 
             try:
                 resp = self._client.conversations_replies(**kwargs)
+                self._pace()
             except SlackApiError as exc:
                 logger.warning(
                     "conversations.replies error for thread %s/%s: %s",
@@ -166,6 +179,45 @@ class SlackClient:
 
     # ── users ─────────────────────────────────────────────────────────────────
 
+    def prefetch_users(self) -> None:
+        """
+        Bulk-load all workspace users into the cache in one paginated call.
+
+        Much cheaper than one users.info per mention — a single users.list
+        page returns up to 200 users, vs. one API call per user otherwise.
+        """
+        cursor = None
+        count = 0
+        while True:
+            kwargs: dict = {"limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            try:
+                resp = self._client.users_list(**kwargs)
+                self._pace()
+            except SlackApiError as exc:
+                logger.warning("users.list error: %s", exc.response["error"])
+                break
+
+            for user in resp.get("members", []):
+                uid = user["id"]
+                profile = user.get("profile", {})
+                name = (
+                    profile.get("display_name")
+                    or profile.get("real_name")
+                    or user.get("name")
+                    or uid
+                )
+                self._user_cache[uid] = name
+                count += 1
+
+            meta = resp.get("response_metadata", {})
+            cursor = meta.get("next_cursor")
+            if not cursor:
+                break
+
+        logger.info("Prefetched %d user names", count)
+
     def get_user_name(self, user_id: str) -> str:
         """Return a display name for *user_id*, with caching."""
         if user_id in self._user_cache:
@@ -173,6 +225,7 @@ class SlackClient:
 
         try:
             resp = self._client.users_info(user=user_id)
+            self._pace()
             profile = resp["user"].get("profile", {})
             name = (
                 profile.get("display_name")

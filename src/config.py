@@ -21,6 +21,7 @@ class Config:
     run_once: bool = False
     state_file: str = "/data/state.json"
     batch_size: int = 50
+    api_pause: float = 1.2  # seconds between Slack API calls
 
     @property
     def channel_list(self) -> List[str]:
@@ -46,4 +47,5 @@ class Config:
             run_once=os.environ.get("RUN_ONCE", "false").lower() in ("1", "true", "yes"),
             state_file=os.environ.get("STATE_FILE", "/data/state.json"),
             batch_size=int(os.environ.get("BATCH_SIZE", "50")),
+            api_pause=float(os.environ.get("SLACK_API_PAUSE", "1.2")),
         )
