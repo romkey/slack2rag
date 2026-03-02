@@ -28,6 +28,7 @@ class SlackClient:
     def __init__(self, token: str, api_pause: float = DEFAULT_API_PAUSE) -> None:
         self._client = WebClient(token=token)
         self._user_cache: Dict[str, str] = {}
+        self._user_profiles: Dict[str, dict] = {}
         self._api_pause = api_pause
         self._workspace_url: Optional[str] = None
 
@@ -236,6 +237,7 @@ class SlackClient:
                     or uid
                 )
                 self._user_cache[uid] = name
+                self._user_profiles[uid] = self._extract_profile(user)
                 count += 1
 
             meta = resp.get("response_metadata", {})
@@ -265,6 +267,33 @@ class SlackClient:
 
         self._user_cache[user_id] = name
         return name
+
+    def get_user_profiles(self) -> Dict[str, dict]:
+        """Return all cached user profiles (populated by prefetch_users)."""
+        return self._user_profiles
+
+    @staticmethod
+    def _extract_profile(user: dict) -> dict:
+        """Pull the fields we want from a Slack user object.  No emails."""
+        profile = user.get("profile", {})
+        return {
+            "user_id": user["id"],
+            "username": user.get("name", ""),
+            "display_name": profile.get("display_name", ""),
+            "real_name": profile.get("real_name", ""),
+            "first_name": profile.get("first_name", ""),
+            "last_name": profile.get("last_name", ""),
+            "title": profile.get("title", ""),
+            "pronouns": profile.get("pronouns", ""),
+            "status_text": profile.get("status_text", ""),
+            "status_emoji": profile.get("status_emoji", ""),
+            "timezone": user.get("tz", ""),
+            "timezone_label": user.get("tz_label", ""),
+            "is_admin": user.get("is_admin", False),
+            "is_owner": user.get("is_owner", False),
+            "is_bot": user.get("is_bot", False),
+            "deleted": user.get("deleted", False),
+        }
 
     # ── message metadata helpers ─────────────────────────────────────────────
 

@@ -374,6 +374,14 @@ class VectorStore:
                         key="doc_type",
                         match=qmodels.MatchValue(value="workspace_summary"),
                     ),
+                    qmodels.FieldCondition(
+                        key="doc_type",
+                        match=qmodels.MatchValue(value="user_summary"),
+                    ),
+                    qmodels.FieldCondition(
+                        key="doc_type",
+                        match=qmodels.MatchValue(value="team_summary"),
+                    ),
                 ],
             ),
         )

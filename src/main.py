@@ -22,7 +22,14 @@ from dotenv import load_dotenv
 
 from .config import Config
 from .embedder import Embedder, SparseEncoder
-from .processor import Document, build_documents, build_channel_summary, build_workspace_summary
+from .processor import (
+    Document,
+    build_documents,
+    build_channel_summary,
+    build_workspace_summary,
+    build_user_summary,
+    build_team_summary,
+)
 from .slack_client import SlackClient
 from .state import SyncState
 from .vector_store import VectorStore
@@ -192,16 +199,18 @@ def _flush(
 
 def _index_summaries(
     channels: List[dict],
+    user_profiles: dict[str, dict],
     store: VectorStore,
     embedder: Embedder,
     sparse_encoder: Optional[SparseEncoder],
 ) -> None:
-    """Generate and index workspace + per-channel summary documents.
+    """Generate and index workspace, channel, and user summary documents.
 
     These enable the chatbot to answer structural questions like
-    "what channels do we have?" and "how active is #engineering?"
+    "what channels do we have?", "how active is #engineering?",
+    "who is on the team?", and "what does Alice do?"
     """
-    logger.info("Generating channel and workspace summaries…")
+    logger.info("Generating channel, workspace, and user summaries…")
 
     channel_counts: dict[str, int] = {}
     summary_docs: List[Document] = []
@@ -212,6 +221,12 @@ def _index_summaries(
         summary_docs.append(build_channel_summary(ch, count))
 
     summary_docs.append(build_workspace_summary(channels, channel_counts))
+
+    profiles = list(user_profiles.values())
+    for p in profiles:
+        if not p.get("deleted"):
+            summary_docs.append(build_user_summary(p))
+    summary_docs.append(build_team_summary(profiles))
 
     _flush(summary_docs, store, embedder, sparse_encoder)
     logger.info("Indexed %d summary documents", len(summary_docs))
@@ -241,7 +256,7 @@ def run_once(
             refresh_threads(ch, slack, store, embedder, sparse_encoder, cfg,
                             cfg.thread_update_lookback_hours)
 
-    _index_summaries(channels, store, embedder, sparse_encoder)
+    _index_summaries(channels, slack.get_user_profiles(), store, embedder, sparse_encoder)
     logger.info("Sync complete — %d documents indexed  (total in store: %d)", total, store.count())
 
 

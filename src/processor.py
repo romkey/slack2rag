@@ -344,3 +344,105 @@ def build_workspace_summary(
         reply_count=0,
         doc_type="workspace_summary",
     )
+
+
+def build_user_summary(profile: dict) -> Document:
+    """Build a summary document for a single Slack user.
+
+    Surfaces when users ask "who is Alice?", "what does Bob do?",
+    "what timezone is Carol in?", or "what are Alice's pronouns?"
+    """
+    uid = profile["user_id"]
+    display = profile.get("display_name") or profile.get("real_name") or profile.get("username") or uid
+    real = profile.get("real_name", "")
+    username = profile.get("username", "")
+
+    lines = [f"Team member: {display}"]
+    if real and real != display:
+        lines.append(f"Full name: {real}")
+    if username:
+        lines.append(f"Username: @{username}")
+    if profile.get("title"):
+        lines.append(f"Title: {profile['title']}")
+    if profile.get("pronouns"):
+        lines.append(f"Pronouns: {profile['pronouns']}")
+    if profile.get("timezone_label"):
+        tz = profile.get("timezone", "")
+        lines.append(f"Timezone: {profile['timezone_label']}" + (f" ({tz})" if tz else ""))
+    if profile.get("status_text"):
+        emoji = profile.get("status_emoji", "")
+        lines.append(f"Status: {profile['status_text']} {emoji}".strip())
+    if profile.get("is_owner"):
+        lines.append("Role: workspace owner")
+    elif profile.get("is_admin"):
+        lines.append("Role: workspace admin")
+    if profile.get("is_bot"):
+        lines.append("This is a bot account.")
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return Document(
+        id=_make_summary_id(f"user:{uid}"),
+        text="\n".join(lines),
+        channel_id="users",
+        channel_name="users",
+        ts="0",
+        date="",
+        datetime_str=now,
+        user_id=uid,
+        user_name=display,
+        thread_ts=None,
+        reply_count=0,
+        doc_type="user_summary",
+    )
+
+
+def build_team_summary(profiles: List[dict]) -> Document:
+    """Build a summary document listing all team members.
+
+    Surfaces when users ask "who is on the team?", "how many people
+    do we have?", or "list all team members."
+    """
+    active = [p for p in profiles if not p.get("deleted") and not p.get("is_bot")]
+    bots = [p for p in profiles if p.get("is_bot") and not p.get("deleted")]
+
+    lines = [f"This Slack workspace has {len(active)} active team member{'s' if len(active) != 1 else ''}"]
+    if bots:
+        lines[0] += f" and {len(bots)} bot{'s' if len(bots) != 1 else ''}."
+    else:
+        lines[0] += "."
+
+    lines.append("")
+    lines.append("Team members:")
+    for p in sorted(active, key=lambda p: (p.get("real_name") or p.get("display_name") or "").lower()):
+        display = p.get("display_name") or p.get("real_name") or p.get("username") or p["user_id"]
+        parts = [f"  {display}"]
+        if p.get("title"):
+            parts.append(f"({p['title']})")
+        if p.get("pronouns"):
+            parts.append(f"[{p['pronouns']}]")
+        lines.append(" ".join(parts))
+
+    if bots:
+        lines.append("")
+        lines.append("Bots:")
+        for p in sorted(bots, key=lambda p: (p.get("real_name") or p.get("display_name") or "").lower()):
+            display = p.get("display_name") or p.get("real_name") or p.get("username") or p["user_id"]
+            lines.append(f"  {display}")
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return Document(
+        id=_make_summary_id("team"),
+        text="\n".join(lines),
+        channel_id="users",
+        channel_name="users",
+        ts="0",
+        date="",
+        datetime_str=now,
+        user_id="system",
+        user_name="system",
+        thread_ts=None,
+        reply_count=0,
+        doc_type="team_summary",
+    )
