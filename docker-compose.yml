@@ -13,6 +13,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # Ollama provides embedding models.  Pull your model after first start:
+  #   docker compose exec ollama ollama pull nomic-embed-text
+  # If you already have Ollama running on the host, comment this out and
+  # set OLLAMA_URL=http://host.docker.internal:11434 in .env instead.
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
   slack2rag:
     # Use the pre-built image from GHCR when available, otherwise build locally.
     # Override with:  IMAGE=ghcr.io/you/slack2rag:latest docker compose up
@@ -21,13 +33,15 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+      ollama:
+        condition: service_started
     env_file:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
+      OLLAMA_URL: http://ollama:11434
     volumes:
       - slack2rag_state:/data
-      - model_cache:/app/hf_cache
     restart: unless-stopped
 
   # One-shot query tool — not started by default.
@@ -42,15 +56,16 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+      ollama:
+        condition: service_started
     env_file:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
-    volumes:
-      - model_cache:/app/hf_cache
+      OLLAMA_URL: http://ollama:11434
     command: ["python", "-m", "src.query"]
 
 volumes:
   qdrant_data:
   slack2rag_state:
-  model_cache:
+  ollama_data:

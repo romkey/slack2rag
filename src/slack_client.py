@@ -29,11 +29,38 @@ class SlackClient:
         self._client = WebClient(token=token)
         self._user_cache: Dict[str, str] = {}
         self._api_pause = api_pause
+        self._workspace_url: Optional[str] = None
 
     def _pace(self) -> None:
         """Sleep between API calls to stay under Slack's rate limits."""
         if self._api_pause > 0:
             time.sleep(self._api_pause)
+
+    # ── workspace ─────────────────────────────────────────────────────────────
+
+    def fetch_workspace_url(self) -> str:
+        """Call auth.test once to discover the workspace URL for permalinks."""
+        if self._workspace_url is None:
+            try:
+                resp = self._client.auth_test()
+                self._pace()
+                self._workspace_url = resp.get("url", "").rstrip("/")
+                logger.info("Workspace URL: %s", self._workspace_url)
+            except SlackApiError as exc:
+                logger.warning("auth.test failed: %s", exc.response["error"])
+                self._workspace_url = ""
+        return self._workspace_url
+
+    def make_permalink(self, channel_id: str, ts: str, thread_ts: Optional[str] = None) -> str:
+        """Construct a Slack permalink from channel ID and timestamp."""
+        base = self.fetch_workspace_url()
+        if not base:
+            return ""
+        ts_compact = ts.replace(".", "")
+        link = f"{base}/archives/{channel_id}/p{ts_compact}"
+        if thread_ts and thread_ts != ts:
+            link += f"?thread_ts={thread_ts}&cid={channel_id}"
+        return link
 
     # ── channels ──────────────────────────────────────────────────────────────
 
@@ -238,6 +265,32 @@ class SlackClient:
 
         self._user_cache[user_id] = name
         return name
+
+    # ── message metadata helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def get_reactions(msg: dict) -> tuple[int, List[str]]:
+        """Return (total_reaction_count, list_of_reaction_names) from a message."""
+        reactions = msg.get("reactions", [])
+        names = [r["name"] for r in reactions]
+        total = sum(r.get("count", 1) for r in reactions)
+        return total, names
+
+    @staticmethod
+    def get_attachments(msg: dict) -> List[str]:
+        """Return list of filenames from message attachments/files."""
+        filenames: List[str] = []
+        for f in msg.get("files", []):
+            name = f.get("name") or f.get("title") or f.get("id", "unknown_file")
+            filenames.append(name)
+        return filenames
+
+    @staticmethod
+    def get_channel_topic(channel: dict) -> str:
+        """Extract the channel topic or purpose string."""
+        topic = channel.get("topic", {}).get("value", "")
+        purpose = channel.get("purpose", {}).get("value", "")
+        return topic or purpose
 
     # ── text helpers ──────────────────────────────────────────────────────────
 

@@ -1,6 +1,10 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
+
+
+def _bool_env(value: str) -> bool:
+    return value.lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -12,16 +16,19 @@ class Config:
 
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
 
-    embedding_provider: str = "local"  # "local" | "openai"
-    local_embedding_model: str = "all-MiniLM-L6-v2"
-    openai_api_key: str = ""
-    openai_embedding_model: str = "text-embedding-3-small"
+    ollama_url: str = "http://localhost:11434"
+    ollama_embedding_model: str = "nomic-embed-text"
 
     sync_interval_minutes: int = 60
     run_once: bool = False
     state_file: str = "/data/state.json"
     batch_size: int = 50
     api_pause: float = 1.2  # seconds between Slack API calls
+
+    min_message_length: int = 20
+    score_threshold: float = 0.0
+    hybrid_search: bool = False
+    thread_update_lookback_hours: int = 0
 
     @property
     def channel_list(self) -> List[str]:
@@ -39,13 +46,15 @@ class Config:
             qdrant_url=os.environ.get("QDRANT_URL", "http://qdrant:6333"),
             qdrant_collection=os.environ.get("QDRANT_COLLECTION", "slack_messages"),
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
-            embedding_provider=os.environ.get("EMBEDDING_PROVIDER", "local"),
-            local_embedding_model=os.environ.get("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
-            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-            openai_embedding_model=os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+            ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+            ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
             sync_interval_minutes=int(os.environ.get("SYNC_INTERVAL_MINUTES", "60")),
-            run_once=os.environ.get("RUN_ONCE", "false").lower() in ("1", "true", "yes"),
+            run_once=_bool_env(os.environ.get("RUN_ONCE", "false")),
             state_file=os.environ.get("STATE_FILE", "/data/state.json"),
             batch_size=int(os.environ.get("BATCH_SIZE", "50")),
             api_pause=float(os.environ.get("SLACK_API_PAUSE", "1.2")),
+            min_message_length=int(os.environ.get("MIN_MESSAGE_LENGTH", "20")),
+            score_threshold=float(os.environ.get("SCORE_THRESHOLD", "0.0")),
+            hybrid_search=_bool_env(os.environ.get("HYBRID_SEARCH", "false")),
+            thread_update_lookback_hours=int(os.environ.get("THREAD_UPDATE_LOOKBACK_HOURS", "0")),
         )

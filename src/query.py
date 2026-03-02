@@ -11,14 +11,13 @@ Usage (local, against a running Qdrant):
 """
 
 import argparse
-import os
 import sys
 import textwrap
 
 from dotenv import load_dotenv
 
 from .config import Config
-from .embedder import Embedder
+from .embedder import Embedder, SparseEncoder
 from .vector_store import VectorStore
 
 load_dotenv()
@@ -27,7 +26,8 @@ _SCORE_BAR_WIDTH = 20
 
 
 def _score_bar(score: float) -> str:
-    filled = round(score * _SCORE_BAR_WIDTH)
+    clamped = max(0.0, min(1.0, score))
+    filled = round(clamped * _SCORE_BAR_WIDTH)
     return "█" * filled + "░" * (_SCORE_BAR_WIDTH - filled)
 
 
@@ -35,19 +35,38 @@ def _print_result(idx: int, hit: dict, show_score: bool) -> None:
     score = hit.get("score", 0.0)
     channel = hit.get("channel_name", hit.get("channel_id", "?"))
     date = hit.get("date", "")
+    dt = hit.get("datetime", "")
     user = hit.get("user_name", hit.get("user_id", "?"))
     text = hit.get("text", "")
     reply_count = hit.get("reply_count", 0)
-    thread_note = f"  [{reply_count} repl{'y' if reply_count == 1 else 'ies'}]" if reply_count else ""
+    reaction_count = hit.get("reaction_count", 0)
+    permalink = hit.get("permalink", "")
+    channel_topic = hit.get("channel_topic", "")
+    attachments = hit.get("attachments", [])
 
-    header = f"#{idx + 1}  #{channel}  {date}  @{user}{thread_note}"
+    thread_note = ""
+    if reply_count:
+        thread_note = f"  [{reply_count} repl{'y' if reply_count == 1 else 'ies'}]"
+
+    reaction_note = ""
+    if reaction_count:
+        reaction_note = f"  {reaction_count} reaction{'s' if reaction_count != 1 else ''}"
+
+    display_date = dt if dt else date
+    header = f"#{idx + 1}  #{channel}  {display_date}  @{user}{thread_note}{reaction_note}"
     if show_score:
         header += f"  {_score_bar(score)}  {score:.3f}"
 
     print(header)
-    print("─" * len(header))
+    if channel_topic:
+        print(f"  topic: {channel_topic}")
+    print("─" * max(len(header), 60))
     for line in textwrap.wrap(text, width=90):
         print("  " + line)
+    if attachments:
+        print(f"  📎 {', '.join(attachments)}")
+    if permalink:
+        print(f"  🔗 {permalink}")
     print()
 
 
@@ -100,31 +119,38 @@ def main(argv: list[str] | None = None) -> None:
 
     cfg = Config.from_env()
 
-    embedder = Embedder(
-        provider=cfg.embedding_provider,
-        local_model=cfg.local_embedding_model,
-        openai_api_key=cfg.openai_api_key,
-        openai_model=cfg.openai_embedding_model,
-    )
+    embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model)
+    sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
+
     store = VectorStore(
         url=cfg.qdrant_url,
         collection=cfg.qdrant_collection,
         dimension=embedder.dimension,
+        hybrid=cfg.hybrid_search,
     )
 
-    print(f'\nSearching for: "{query_text}"\n')
+    print(f'\nSearching for: "{query_text}"')
+    if cfg.hybrid_search:
+        print("  (hybrid: dense + sparse)")
+    print()
 
     vector = embedder.embed([query_text])[0]
+    sparse_vector = sparse_encoder.encode([query_text])[0] if sparse_encoder else None
+
     results = store.search(
         query_vector=vector,
         limit=args.limit,
         channel_filter=args.channel,
         date_from=args.date_from,
         date_to=args.date_to,
+        score_threshold=cfg.score_threshold,
+        sparse_vector=sparse_vector,
     )
 
     if not results:
         print("No results found.")
+        if cfg.score_threshold > 0:
+            print(f"  (score threshold is set to {cfg.score_threshold} — try lowering it)")
         sys.exit(0)
 
     total = store.count()
