@@ -29,6 +29,7 @@ class Config:
     score_threshold: float = 0.0
     hybrid_search: bool = False
     thread_update_lookback_hours: int = 0
+    reaction_boost_threshold: int = 3  # prepend "[highlighted by team]" at this many reactions
 
     @property
     def channel_list(self) -> List[str]:
@@ -57,4 +58,5 @@ class Config:
             score_threshold=float(os.environ.get("SCORE_THRESHOLD", "0.0")),
             hybrid_search=_bool_env(os.environ.get("HYBRID_SEARCH", "false")),
             thread_update_lookback_hours=int(os.environ.get("THREAD_UPDATE_LOOKBACK_HOURS", "0")),
+            reaction_boost_threshold=int(os.environ.get("REACTION_BOOST_THRESHOLD", "3")),
         )

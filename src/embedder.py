@@ -46,6 +46,15 @@ def _token_hash(token: str) -> int:
     return int(hashlib.md5(token.encode()).hexdigest(), 16) % SPARSE_VOCAB_SIZE
 
 
+def tokenize_text(text: str) -> List[str]:
+    """Tokenize *text* into lower-case non-stopword terms (len > 1).
+
+    Useful for both sparse encoding and term-frequency analysis.
+    """
+    return [t for t in _TOKEN_RE.findall(text.lower())
+            if t not in _STOPWORDS and len(t) > 1]
+
+
 class SparseEncoder:
     """Deterministic BM25-like sparse vector encoder (no training required)."""
 
@@ -54,23 +63,17 @@ class SparseEncoder:
         return [self._encode_one(t) for t in texts]
 
     def _encode_one(self, text: str) -> dict:
-        tokens = [t for t in _TOKEN_RE.findall(text.lower())
-                  if t not in _STOPWORDS and len(t) > 1]
+        tokens = tokenize_text(text)
         if not tokens:
             return {"indices": [0], "values": [0.0]}
 
         counts = Counter(tokens)
-        pairs: list[tuple[int, float]] = []
-        seen_indices: set[int] = set()
-
+        bucket_weights: dict[int, float] = {}
         for token, count in counts.items():
             idx = _token_hash(token)
-            if idx in seen_indices:
-                continue
-            seen_indices.add(idx)
-            pairs.append((idx, 1.0 + math.log(count)))
+            bucket_weights[idx] = bucket_weights.get(idx, 0.0) + 1.0 + math.log(count)
 
-        pairs.sort(key=lambda p: p[0])
+        pairs = sorted(bucket_weights.items())
         return {
             "indices": [p[0] for p in pairs],
             "values": [p[1] for p in pairs],

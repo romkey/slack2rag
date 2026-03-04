@@ -22,6 +22,8 @@ Collection payload fields
   reaction_count : int        — total emoji reactions
   reactions      : list[str]  — reaction names
   attachments    : list[str]  — filenames of attached files
+  doc_type       : str        — document type
+  source_system  : str        — originating system ("slack", "calibre", etc.)
 """
 
 from __future__ import annotations
@@ -108,7 +110,7 @@ class VectorStore:
 
     def _ensure_payload_indexes(self) -> None:
         """Create payload indexes if they don't already exist (idempotent)."""
-        for field_name in ("channel_id", "channel_name", "date", "user_id", "doc_type"):
+        for field_name in ("channel_id", "channel_name", "date", "user_id", "doc_type", "source_system"):
             try:
                 self._client.create_payload_index(
                     collection_name=self._collection,
@@ -368,19 +370,9 @@ class VectorStore:
                 must_not=[
                     qmodels.FieldCondition(
                         key="doc_type",
-                        match=qmodels.MatchValue(value="channel_summary"),
-                    ),
-                    qmodels.FieldCondition(
-                        key="doc_type",
-                        match=qmodels.MatchValue(value="workspace_summary"),
-                    ),
-                    qmodels.FieldCondition(
-                        key="doc_type",
-                        match=qmodels.MatchValue(value="user_summary"),
-                    ),
-                    qmodels.FieldCondition(
-                        key="doc_type",
-                        match=qmodels.MatchValue(value="team_summary"),
+                        match=qmodels.MatchAny(any=["channel_summary", "workspace_summary",
+                                                      "user_summary", "team_summary",
+                                                      "thread_summary"]),
                     ),
                 ],
             ),

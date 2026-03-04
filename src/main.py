@@ -10,19 +10,23 @@ Flow per sync cycle
 5. Embed in batches and upsert into Qdrant.
 6. Advance the channel cursor.
 7. Optionally refresh recently-active threads that gained new replies.
-8. Sleep until the next cycle (or exit if RUN_ONCE=true).
+8. Generate summary documents (channels, workspace, users, team).
+9. Sleep until the next cycle (or exit if RUN_ONCE=true).
 """
 
+import json
 import logging
 import os
 import time
+from collections import Counter
 from typing import List, Optional
 
 from dotenv import load_dotenv
 
 from .config import Config
-from .embedder import Embedder, SparseEncoder
+from .embedder import Embedder, SparseEncoder, tokenize_text
 from .processor import (
+    ChannelStats,
     Document,
     build_documents,
     build_channel_summary,
@@ -80,6 +84,7 @@ def _build_docs_for_message(
         reactions=reactions,
         attachments=attachments,
         min_message_length=cfg.min_message_length,
+        reaction_boost_threshold=cfg.reaction_boost_threshold,
     )
 
 
@@ -91,8 +96,8 @@ def sync_channel(
     sparse_encoder: Optional[SparseEncoder],
     state: SyncState,
     cfg: Config,
-) -> int:
-    """Sync one channel.  Returns the number of new documents indexed."""
+) -> tuple[int, ChannelStats]:
+    """Sync one channel.  Returns (documents_indexed, channel_stats)."""
     channel_id = channel["id"]
     channel_name = channel.get("name", channel_id)
     oldest_ts = state.get_cursor(channel_id)
@@ -102,6 +107,7 @@ def sync_channel(
     pending_docs: List[Document] = []
     latest_ts: str | None = oldest_ts
     total_indexed = 0
+    stats = ChannelStats()
 
     for msg in slack.get_channel_messages(channel_id, oldest_ts=oldest_ts):
         ts = msg["ts"]
@@ -112,6 +118,23 @@ def sync_channel(
         replies: List[dict] = []
         if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == ts:
             replies = slack.get_thread_replies(channel_id, ts)
+
+        # Accumulate channel statistics
+        raw_text = msg.get("text", "")
+        stats.token_counts.update(Counter(tokenize_text(raw_text)))
+        uid = msg.get("user", "unknown")
+        if uid != "unknown":
+            stats.user_counts[uid] += 1
+        try:
+            stats.timestamps.append(float(ts))
+        except (ValueError, TypeError):
+            pass
+        for reply in replies:
+            reply_text = reply.get("text", "")
+            stats.token_counts.update(Counter(tokenize_text(reply_text)))
+            ruid = reply.get("user", "unknown")
+            if ruid != "unknown":
+                stats.user_counts[ruid] += 1
 
         docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
         pending_docs.extend(docs)
@@ -129,7 +152,7 @@ def sync_channel(
     else:
         logger.info("#%s  no new messages", channel_name)
 
-    return total_indexed
+    return total_indexed, stats
 
 
 def refresh_threads(
@@ -197,35 +220,74 @@ def _flush(
     return len(docs)
 
 
+def _load_channel_stats(stats_file: str) -> dict[str, ChannelStats]:
+    """Load persistent channel stats from disk."""
+    if not os.path.exists(stats_file):
+        return {}
+    try:
+        with open(stats_file) as f:
+            raw = json.load(f)
+        return {k: ChannelStats.from_dict(v) for k, v in raw.items()}
+    except (json.JSONDecodeError, OSError, KeyError):
+        return {}
+
+
+def _save_channel_stats(stats_file: str, all_stats: dict[str, ChannelStats]) -> None:
+    """Persist accumulated channel stats to disk."""
+    os.makedirs(os.path.dirname(stats_file) or ".", exist_ok=True)
+    raw = {k: v.to_dict() for k, v in all_stats.items()}
+    try:
+        with open(stats_file, "w") as f:
+            json.dump(raw, f)
+    except OSError as exc:
+        logger.warning("Could not save channel stats: %s", exc)
+
+
 def _index_summaries(
     channels: List[dict],
+    channel_stats: dict[str, ChannelStats],
     user_profiles: dict[str, dict],
+    get_user_name,
     store: VectorStore,
     embedder: Embedder,
     sparse_encoder: Optional[SparseEncoder],
 ) -> None:
-    """Generate and index workspace, channel, and user summary documents.
-
-    These enable the chatbot to answer structural questions like
-    "what channels do we have?", "how active is #engineering?",
-    "who is on the team?", and "what does Alice do?"
-    """
+    """Generate and index workspace, channel, user, and team summary documents."""
     logger.info("Generating channel, workspace, and user summaries…")
 
     channel_counts: dict[str, int] = {}
     summary_docs: List[Document] = []
 
     for ch in channels:
-        count = store.count_by_channel(ch["id"])
-        channel_counts[ch["id"]] = count
-        summary_docs.append(build_channel_summary(ch, count))
+        cid = ch["id"]
+        count = store.count_by_channel(cid)
+        channel_counts[cid] = count
+        summary_docs.append(
+            build_channel_summary(
+                ch, count,
+                stats=channel_stats.get(cid),
+                get_user_name=get_user_name,
+            )
+        )
 
     summary_docs.append(build_workspace_summary(channels, channel_counts))
+
+    # Build user→channel activity map from accumulated stats
+    user_channels: dict[str, Counter] = {}
+    channel_names = {ch["id"]: ch.get("name", ch["id"]) for ch in channels}
+    for cid, cstats in channel_stats.items():
+        cname = channel_names.get(cid, cid)
+        for uid, msg_count in cstats.user_counts.items():
+            if uid not in user_channels:
+                user_channels[uid] = Counter()
+            user_channels[uid][cname] += msg_count
 
     profiles = list(user_profiles.values())
     for p in profiles:
         if not p.get("deleted"):
-            summary_docs.append(build_user_summary(p))
+            uid = p["user_id"]
+            active = [ch for ch, _ in user_channels.get(uid, Counter()).most_common(10)]
+            summary_docs.append(build_user_summary(p, active_channels=active or None))
     summary_docs.append(build_team_summary(profiles))
 
     _flush(summary_docs, store, embedder, sparse_encoder)
@@ -245,9 +307,20 @@ def run_once(
         logger.warning("No accessible public channels found")
         return
 
+    stats_file = os.path.join(os.path.dirname(cfg.state_file), "channel_stats.json")
+    all_stats = _load_channel_stats(stats_file)
+
     total = 0
     for ch in channels:
-        total += sync_channel(ch, slack, store, embedder, sparse_encoder, state, cfg)
+        count, new_stats = sync_channel(ch, slack, store, embedder, sparse_encoder, state, cfg)
+        total += count
+        cid = ch["id"]
+        if cid in all_stats:
+            all_stats[cid].merge(new_stats)
+        else:
+            all_stats[cid] = new_stats
+
+    _save_channel_stats(stats_file, all_stats)
 
     if cfg.thread_update_lookback_hours > 0:
         logger.info("Starting thread-update refresh pass (%dh lookback)…",
@@ -256,7 +329,10 @@ def run_once(
             refresh_threads(ch, slack, store, embedder, sparse_encoder, cfg,
                             cfg.thread_update_lookback_hours)
 
-    _index_summaries(channels, slack.get_user_profiles(), store, embedder, sparse_encoder)
+    _index_summaries(
+        channels, all_stats, slack.get_user_profiles(),
+        slack.get_user_name, store, embedder, sparse_encoder,
+    )
     logger.info("Sync complete — %d documents indexed  (total in store: %d)", total, store.count())
 
 

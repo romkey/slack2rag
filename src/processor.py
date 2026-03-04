@@ -8,17 +8,24 @@ Strategy
 * Standalone messages (no replies) are individual documents.
 * Documents longer than MAX_CHARS are split into overlapping chunks
   using line-aware splitting so no message is cut mid-sentence.
+* Threads with 3+ replies also get a condensed ``thread_summary``
+  document for holistic retrieval ("what was decided about X?").
+* High-reaction messages are prepended with ``[highlighted by team]``
+  to cluster community-curated content together in vector space.
 """
 
 from __future__ import annotations
 
 import datetime
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 MAX_CHARS = 1_500   # target document size before chunking
 OVERLAP = 200       # character overlap between consecutive chunks
+THREAD_SUMMARY_MIN_REPLIES = 3
+REPLY_PREVIEW_CHARS = 120
 
 
 @dataclass
@@ -41,7 +48,8 @@ class Document:
     reaction_count: int = 0
     reactions: List[str] = field(default_factory=list)
     attachments: List[str] = field(default_factory=list)
-    doc_type: str = "message"     # "message" | "channel_summary" | "workspace_summary"
+    doc_type: str = "message"
+    source_system: str = "slack"
 
     def payload(self) -> dict:
         """Return metadata dict suitable for Qdrant point payload."""
@@ -62,6 +70,7 @@ class Document:
             "reactions": self.reactions,
             "attachments": self.attachments,
             "doc_type": self.doc_type,
+            "source_system": self.source_system,
         }
 
 
@@ -161,6 +170,7 @@ def build_documents(
     reactions: Optional[List[str]] = None,
     attachments: Optional[List[str]] = None,
     min_message_length: int = 0,
+    reaction_boost_threshold: int = 0,
 ) -> List[Document]:
     """
     Build one or more Documents from a root message and its replies.
@@ -168,6 +178,13 @@ def build_documents(
     Returns multiple Documents when the combined text exceeds MAX_CHARS.
     Returns an empty list for messages shorter than *min_message_length*
     (standalone messages only — threads are always kept).
+
+    When *reaction_boost_threshold* > 0 and the message has at least that
+    many reactions, ``[highlighted by team]`` is prepended to help the
+    embedding model cluster community-curated content together.
+
+    Threads with 3+ replies also produce a condensed ``thread_summary``
+    document alongside the regular message documents.
     """
     channel_id = channel["id"]
     channel_name = channel.get("name", channel_id)
@@ -185,22 +202,29 @@ def build_documents(
     if root_text:
         lines.append(root_text)
 
+    reply_lines: List[str] = []
     for reply in replies:
         user_id = reply.get("user", "unknown")
         user_name = get_user_name(user_id)
         reply_text = _format_message(reply, user_name, resolve_text)
         if reply_text:
-            lines.append(reply_text)
+            reply_lines.append(reply_text)
+    lines.extend(reply_lines)
 
     full_text = "\n".join(lines).strip()
     if not full_text:
         return []
 
-    # Filter short standalone messages (threads are always kept)
     if reply_count == 0 and min_message_length > 0 and len(full_text) < min_message_length:
         return []
 
-    chunks = _chunk(full_text)
+    boosted = (
+        reaction_boost_threshold > 0
+        and reaction_count >= reaction_boost_threshold
+    )
+    embed_text = f"[highlighted by team] {full_text}" if boosted else full_text
+
+    chunks = _chunk(embed_text)
     docs: List[Document] = []
 
     for idx, chunk_text in enumerate(chunks):
@@ -229,7 +253,88 @@ def build_documents(
             )
         )
 
+    if reply_count >= THREAD_SUMMARY_MIN_REPLIES and root_text and reply_lines:
+        thread_doc = _build_thread_summary(
+            root_text=root_text,
+            reply_lines=reply_lines,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            ts=ts,
+            date=date,
+            datetime_str=datetime_str,
+            root_user_id=root_user_id,
+            root_user_name=root_user_name,
+            thread_ts=thread_ts,
+            reply_count=reply_count,
+            permalink=permalink,
+            channel_topic=channel_topic,
+            reaction_count=reaction_count,
+            reactions=reactions or [],
+            attachments=attachments or [],
+        )
+        docs.append(thread_doc)
+
     return docs
+
+
+def _build_thread_summary(
+    *,
+    root_text: str,
+    reply_lines: List[str],
+    channel_id: str,
+    channel_name: str,
+    ts: str,
+    date: str,
+    datetime_str: str,
+    root_user_id: str,
+    root_user_name: str,
+    thread_ts: str,
+    reply_count: int,
+    permalink: str,
+    channel_topic: str,
+    reaction_count: int,
+    reactions: List[str],
+    attachments: List[str],
+) -> Document:
+    """Build a condensed single-chunk summary of a thread.
+
+    Includes the full root message and a preview of each reply so the
+    retriever can surface the holistic conversation for queries like
+    "what did we decide about X?"
+    """
+    lines = [
+        f"Thread in #{channel_name} ({reply_count} replies, {date}):",
+        root_text,
+    ]
+    for rl in reply_lines:
+        preview = rl[:REPLY_PREVIEW_CHARS]
+        if len(rl) > REPLY_PREVIEW_CHARS:
+            preview += "…"
+        lines.append(preview)
+
+    text = "\n".join(lines)
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS - 1] + "…"
+
+    return Document(
+        id=_make_summary_id(f"thread:{channel_id}:{ts}"),
+        text=text,
+        channel_id=channel_id,
+        channel_name=channel_name,
+        ts=ts,
+        date=date,
+        datetime_str=datetime_str,
+        user_id=root_user_id,
+        user_name=root_user_name,
+        thread_ts=thread_ts,
+        reply_count=reply_count,
+        permalink=permalink,
+        channel_topic=channel_topic,
+        reaction_count=reaction_count,
+        reactions=reactions,
+        attachments=attachments,
+        doc_type="thread_summary",
+    )
 
 
 # ── Summary documents ─────────────────────────────────────────────────────────
@@ -249,9 +354,70 @@ def _ts_to_iso_date(ts_str: str) -> str:
         return ""
 
 
+@dataclass
+class ChannelStats:
+    """Accumulated per-channel statistics built during sync."""
+    token_counts: Counter = field(default_factory=Counter)
+    user_counts: Counter = field(default_factory=Counter)
+    timestamps: list[float] = field(default_factory=list)
+
+    def top_terms(self, n: int = 20) -> List[str]:
+        return [term for term, _ in self.token_counts.most_common(n)]
+
+    def top_posters(self, n: int = 10, get_name=None) -> List[str]:
+        names = []
+        for uid, _ in self.user_counts.most_common(n):
+            names.append(get_name(uid) if get_name else uid)
+        return names
+
+    def cadence(self) -> dict:
+        """Return messages_last_7d, messages_last_30d, last_message_date."""
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        d7 = now - 7 * 86400
+        d30 = now - 30 * 86400
+        last_ts = max(self.timestamps) if self.timestamps else 0
+        last_date = ""
+        if last_ts:
+            last_date = datetime.datetime.fromtimestamp(
+                last_ts, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d")
+        return {
+            "messages_last_7d": sum(1 for t in self.timestamps if t >= d7),
+            "messages_last_30d": sum(1 for t in self.timestamps if t >= d30),
+            "last_message_date": last_date,
+        }
+
+    def to_dict(self) -> dict:
+        """Serialize for persistent storage."""
+        return {
+            "token_counts": dict(self.token_counts.most_common(500)),
+            "user_counts": dict(self.user_counts),
+            "timestamps": self.timestamps[-10_000:],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChannelStats":
+        cs = cls()
+        cs.token_counts = Counter(data.get("token_counts", {}))
+        cs.user_counts = Counter(data.get("user_counts", {}))
+        cs.timestamps = data.get("timestamps", [])
+        return cs
+
+    def merge(self, other: "ChannelStats") -> None:
+        """Merge stats from an incremental sync into the accumulated total."""
+        self.token_counts += other.token_counts
+        self.user_counts += other.user_counts
+        self.timestamps.extend(other.timestamps)
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        cutoff = now - 90 * 86400
+        self.timestamps = [t for t in self.timestamps if t >= cutoff]
+
+
 def build_channel_summary(
     channel: dict,
     message_count: int,
+    stats: Optional[ChannelStats] = None,
+    get_user_name=None,
 ) -> Document:
     """Build a summary document describing a single channel.
 
@@ -277,6 +443,21 @@ def build_channel_summary(
     lines.append(f"Indexed messages: {message_count:,}")
     if message_count == 0:
         lines.append("This channel has no indexed messages yet.")
+
+    if stats:
+        cadence = stats.cadence()
+        if cadence["last_message_date"]:
+            lines.append(f"Last message: {cadence['last_message_date']}")
+        lines.append(f"Messages in last 7 days: {cadence['messages_last_7d']}")
+        lines.append(f"Messages in last 30 days: {cadence['messages_last_30d']}")
+
+        top = stats.top_terms(20)
+        if top:
+            lines.append(f"Common topics: {', '.join(top)}")
+
+        posters = stats.top_posters(10, get_name=get_user_name)
+        if posters:
+            lines.append(f"Most active members: {', '.join(posters)}")
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -346,11 +527,17 @@ def build_workspace_summary(
     )
 
 
-def build_user_summary(profile: dict) -> Document:
+def build_user_summary(
+    profile: dict,
+    active_channels: Optional[List[str]] = None,
+) -> Document:
     """Build a summary document for a single Slack user.
 
     Surfaces when users ask "who is Alice?", "what does Bob do?",
     "what timezone is Carol in?", or "what are Alice's pronouns?"
+
+    *active_channels* is a list of channel names where this user
+    has posted, most-active first.
     """
     uid = profile["user_id"]
     display = profile.get("display_name") or profile.get("real_name") or profile.get("username") or uid
@@ -378,6 +565,8 @@ def build_user_summary(profile: dict) -> Document:
         lines.append("Role: workspace admin")
     if profile.get("is_bot"):
         lines.append("This is a bot account.")
+    if active_channels:
+        lines.append(f"Active in: {', '.join('#' + c for c in active_channels)}")
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

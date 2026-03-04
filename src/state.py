@@ -1,6 +1,18 @@
 """
 Persists the latest indexed Slack timestamp per channel so incremental
 syncs only fetch new messages.
+
+Crash-safety note
+-----------------
+The cursor for a channel is only updated *after* all messages in that
+channel have been fetched and flushed to Qdrant (see ``sync_channel``
+in ``main.py``).  If the process crashes mid-batch, some messages that
+were fetched but not yet upserted will be re-fetched on the next run
+because the cursor hasn't advanced yet.  This is the intended
+behaviour — failing safe by re-fetching is better than advancing the
+cursor and silently skipping messages.  Qdrant upserts are idempotent
+(same UUID → overwrite with identical data), so re-indexing is
+harmless.
 """
 
 import json
