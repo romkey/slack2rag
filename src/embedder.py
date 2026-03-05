@@ -25,6 +25,11 @@ from typing import List
 
 logger = logging.getLogger(__name__)
 
+
+class EmbeddingError(RuntimeError):
+    """Raised when the embedding backend returns an error."""
+
+
 # ── Sparse encoder ────────────────────────────────────────────────────────────
 
 SPARSE_VOCAB_SIZE = 2**16  # 65 536 hash buckets — low collision for typical text
@@ -91,7 +96,14 @@ class Embedder:
         self._dimension: int | None = None
 
         logger.info("Connecting to Ollama at %s  model: %s", self._url, model)
-        probe = self._embed(["dimension probe"])
+        try:
+            probe = self._embed(["dimension probe"])
+        except EmbeddingError:
+            raise
+        except Exception as exc:
+            raise EmbeddingError(
+                f"Failed to connect to Ollama at {self._url} with model {model!r}: {exc}"
+            ) from exc
         self._dimension = len(probe[0])
         logger.info("Ollama embedding dimension: %d", self._dimension)
 
@@ -108,6 +120,7 @@ class Embedder:
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
         """Call Ollama's /api/embed endpoint (supports batched input)."""
+        endpoint = f"{self._url}/api/embed"
         results: List[List[float]] = []
         for i in range(0, len(texts), 50):
             batch = texts[i : i + 50]
@@ -116,16 +129,27 @@ class Embedder:
                 "input": batch,
             }).encode()
             req = urllib.request.Request(
-                f"{self._url}/api/embed",
+                endpoint,
                 data=payload,
                 headers={"Content-Type": "application/json"},
             )
             try:
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     data = json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                body = ""
+                try:
+                    body = exc.read().decode(errors="replace").strip()
+                except Exception:
+                    pass
+                raise EmbeddingError(
+                    f"Ollama returned HTTP {exc.code} ({exc.reason}) "
+                    f"for POST {endpoint} with model {self._model!r}"
+                    + (f"\n  Response: {body}" if body else "")
+                ) from exc
             except urllib.error.URLError as exc:
-                raise ConnectionError(
-                    f"Could not reach Ollama at {self._url}: {exc}"
+                raise EmbeddingError(
+                    f"Could not reach Ollama at {self._url}: {exc.reason}"
                 ) from exc
 
             results.extend(data["embeddings"])

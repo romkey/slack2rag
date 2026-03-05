@@ -17,7 +17,7 @@ import textwrap
 from dotenv import load_dotenv
 
 from .config import Config
-from .embedder import Embedder, SparseEncoder
+from .embedder import Embedder, EmbeddingError, SparseEncoder
 from .vector_store import VectorStore
 
 load_dotenv()
@@ -119,7 +119,12 @@ def main(argv: list[str] | None = None) -> None:
 
     cfg = Config.from_env()
 
-    embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model)
+    try:
+        embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model)
+    except EmbeddingError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
 
     store = VectorStore(

@@ -24,7 +24,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 from .config import Config
-from .embedder import Embedder, SparseEncoder, tokenize_text
+from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
 from .processor import (
     ChannelStats,
     Document,
@@ -355,7 +355,12 @@ def main() -> None:
     slack.prefetch_users()
     slack.fetch_workspace_url()
 
-    embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model)
+    try:
+        embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model)
+    except EmbeddingError as exc:
+        logger.error("Embedding setup failed:\n  %s", exc)
+        raise SystemExit(1) from exc
+
     sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
 
     store = VectorStore(
