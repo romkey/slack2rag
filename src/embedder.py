@@ -87,17 +87,46 @@ class SparseEncoder:
 
 # ── Ollama embedder ──────────────────────────────────────────────────────────
 
+_CONTEXT_ERROR_FRAGMENTS = ("context length", "too long", "exceeds")
+_MIN_TEXT_LEN = 64
+
+
+def _is_context_length_error(http_exc: urllib.error.HTTPError) -> bool:
+    """Return True if the HTTP error is Ollama complaining about input length."""
+    if http_exc.code != 400:
+        return False
+    try:
+        body = http_exc.read().decode(errors="replace").lower()
+        return any(frag in body for frag in _CONTEXT_ERROR_FRAGMENTS)
+    except Exception:
+        return False
+
+
+def _truncate_at_word(text: str, max_chars: int) -> str:
+    """Truncate *text* to *max_chars*, cutting at a word boundary."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_space = cut.rfind(" ")
+    if last_space > max_chars // 2:
+        cut = cut[:last_space]
+    return cut
+
+
 class Embedder:
     """Generate dense embeddings via an Ollama server."""
 
-    def __init__(self, url: str, model: str) -> None:
+    def __init__(self, url: str, model: str, context_length: int = 0) -> None:
         self._url = url.rstrip("/")
         self._model = model
         self._dimension: int | None = None
+        self._max_chars = context_length * 3 if context_length > 0 else 0
 
         logger.info("Connecting to Ollama at %s  model: %s", self._url, model)
+        if self._max_chars:
+            logger.info("  context limit: %d tokens (~%d chars)", context_length, self._max_chars)
         try:
-            probe = self._embed(["dimension probe"])
+            probe = self._call_api(["dimension probe"])
         except EmbeddingError:
             raise
         except Exception as exc:
@@ -112,16 +141,66 @@ class Embedder:
         assert self._dimension is not None
         return self._dimension
 
+    # ── public entry point ─────────────────────────────────────────────────
+
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """Return a list of float vectors, one per input text."""
+        """Return a list of float vectors, one per input text.
+
+        Pre-truncates texts to the configured context limit, and
+        automatically retries with shorter input if Ollama still
+        rejects any text for exceeding its context window.
+        """
         if not texts:
             return []
-        return self._embed(texts)
 
-    def _embed(self, texts: List[str]) -> List[List[float]]:
-        """Call Ollama's /api/embed endpoint (supports batched input)."""
+        if self._max_chars:
+            texts = [_truncate_at_word(t, self._max_chars) for t in texts]
+
+        try:
+            return self._call_api(texts)
+        except _ContextLengthError:
+            logger.warning(
+                "Batch of %d texts hit context-length limit — "
+                "falling back to one-at-a-time with auto-truncation",
+                len(texts),
+            )
+            return [self._embed_single(t) for t in texts]
+
+    # ── internals ──────────────────────────────────────────────────────────
+
+    def _embed_single(self, text: str) -> List[float]:
+        """Embed a single text, halving it on each retry if it's too long."""
+        attempt = 0
+        current = text
+        while True:
+            try:
+                return self._call_api([current])[0]
+            except _ContextLengthError:
+                attempt += 1
+                new_len = len(current) // 2
+                if new_len < _MIN_TEXT_LEN:
+                    logger.error(
+                        "Text still too long after %d truncation attempts "
+                        "(%d chars).  Giving up.  Preview: %.200s",
+                        attempt, len(current), text,
+                    )
+                    raise EmbeddingError(
+                        f"Cannot embed text even at {len(current)} chars "
+                        f"(model {self._model!r})"
+                    )
+                current = _truncate_at_word(text, new_len)
+                logger.warning(
+                    "Context-length error (attempt %d) — truncating to %d "
+                    "chars and retrying.  Preview: %.120s",
+                    attempt, len(current), text,
+                )
+
+    def _call_api(self, texts: List[str]) -> List[List[float]]:
+        """Call Ollama's /api/embed endpoint.  Raises _ContextLengthError
+        for context-window rejections, EmbeddingError for everything else."""
         endpoint = f"{self._url}/api/embed"
         results: List[List[float]] = []
+
         for i in range(0, len(texts), 50):
             batch = texts[i : i + 50]
             payload = json.dumps({
@@ -137,6 +216,10 @@ class Embedder:
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     data = json.loads(resp.read())
             except urllib.error.HTTPError as exc:
+                if _is_context_length_error(exc):
+                    raise _ContextLengthError(
+                        f"Input exceeds context length for model {self._model!r}"
+                    ) from exc
                 body = ""
                 try:
                     body = exc.read().decode(errors="replace").strip()
@@ -154,3 +237,7 @@ class Embedder:
 
             results.extend(data["embeddings"])
         return results
+
+
+class _ContextLengthError(EmbeddingError):
+    """Internal: Ollama rejected input as too long for the model's context."""

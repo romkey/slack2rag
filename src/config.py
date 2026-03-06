@@ -18,6 +18,7 @@ class Config:
 
     ollama_url: str = "http://localhost:11434"
     ollama_embedding_model: str = "nomic-embed-text"
+    ollama_context_length: int = 8192  # model context window in tokens; 0 = no truncation
 
     sync_interval_minutes: int = 60
     run_once: bool = False
@@ -49,6 +50,7 @@ class Config:
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
             ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
             ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
+            ollama_context_length=int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "8192")),
             sync_interval_minutes=int(os.environ.get("SYNC_INTERVAL_MINUTES", "60")),
             run_once=_bool_env(os.environ.get("RUN_ONCE", "false")),
             state_file=os.environ.get("STATE_FILE", "/data/state.json"),

@@ -356,7 +356,8 @@ def main() -> None:
     slack.fetch_workspace_url()
 
     try:
-        embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model)
+        embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
+                            context_length=cfg.ollama_context_length)
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)
         raise SystemExit(1) from exc
@@ -379,6 +380,8 @@ def main() -> None:
     while True:
         try:
             run_once(cfg, slack, store, embedder, sparse_encoder, state)
+        except EmbeddingError as exc:
+            logger.error("Sync cycle failed (embedding error): %s", exc)
         except Exception:
             logger.exception("Sync cycle failed — will retry next interval")
         logger.info("Sleeping %d minutes until next sync…", cfg.sync_interval_minutes)
