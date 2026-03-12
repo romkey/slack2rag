@@ -76,15 +76,19 @@ def score_message(
         result = json.loads(response_text)
         score = int(result["score"])
         reason = str(result.get("reason", ""))
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+        logger.warning(
+            "JSON parse failed (%s).  Raw model response: %s",
+            exc, response_text,
+        )
         match = _SCORE_RE.search(response_text)
         if not match:
             logger.warning(
-                "Could not parse score from model response: %.200s",
-                response_text,
+                "Could not extract a numeric score either — skipping",
             )
             return None, ""
         score = int(match.group(1))
+        logger.info("Fell back to regex score extraction: %d", score)
         reason = ""
 
     if score > 10:
