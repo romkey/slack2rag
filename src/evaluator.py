@@ -2,8 +2,9 @@
 Message quality evaluator using an Ollama LLM.
 
 Sends each Slack message along with a user-supplied prompt to an Ollama
-model and expects a numeric score (1–10).  Messages scoring >= 7 are
-written to /results/good.txt; the rest go to /results/bad.txt.
+model and expects a JSON response with ``score`` (1–10) and ``reason``.
+Messages scoring >= 7 are written to /results/good.txt; the rest go to
+/results/bad.txt.
 """
 
 from __future__ import annotations
@@ -23,18 +24,26 @@ GOOD_THRESHOLD = 7
 RESULTS_DIR = "/results"
 
 
-def score_message(ollama_url: str, model: str, prompt: str, message: str) -> int | None:
+def score_message(
+    ollama_url: str, model: str, prompt: str, message: str,
+) -> tuple[int | None, str]:
     """Ask the LLM to score *message* using *prompt*.
 
-    Returns an integer score, or None if the response couldn't be parsed.
+    Returns (score, reason).  score is None if the response couldn't
+    be parsed; reason may be empty.
     """
-    full_prompt = f"{prompt}\n\nMessage:\n{message}\n\nScore (1-10):"
+    full_prompt = (
+        f"{prompt}\n\n"
+        f"Message:\n{message}\n\n"
+        'Respond with JSON: {"score": <1-10>, "reason": "<brief reason>"}'
+    )
 
     endpoint = f"{ollama_url.rstrip('/')}/api/generate"
     payload = json.dumps({
         "model": model,
         "prompt": full_prompt,
         "stream": False,
+        "format": "json",
     }).encode()
 
     req = urllib.request.Request(
@@ -56,28 +65,37 @@ def score_message(ollama_url: str, model: str, prompt: str, message: str) -> int
             "Ollama returned HTTP %d for eval model %r: %s",
             exc.code, model, body,
         )
-        return None
+        return None, ""
     except urllib.error.URLError as exc:
         logger.error("Could not reach Ollama at %s: %s", ollama_url, exc.reason)
-        return None
+        return None, ""
 
     response_text = data.get("response", "").strip()
-    match = _SCORE_RE.search(response_text)
-    if not match:
-        logger.warning(
-            "Could not parse score from model response: %.200s", response_text,
-        )
-        return None
 
-    score = int(match.group(1))
+    try:
+        result = json.loads(response_text)
+        score = int(result["score"])
+        reason = str(result.get("reason", ""))
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        match = _SCORE_RE.search(response_text)
+        if not match:
+            logger.warning(
+                "Could not parse score from model response: %.200s",
+                response_text,
+            )
+            return None, ""
+        score = int(match.group(1))
+        reason = ""
+
     if score > 10:
         logger.warning("Score %d out of range, clamping to 10", score)
         score = 10
-    return score
+    return score, reason
 
 
 def _format_line(
     score: int,
+    reason: str,
     channel_name: str,
     user_name: str,
     ts: str,
@@ -86,7 +104,10 @@ def _format_line(
     preview = text.replace("\n", " ")
     if len(preview) > 300:
         preview = preview[:300] + "…"
-    return f"[{score:>2}] #{channel_name}  @{user_name}  ts={ts}  {preview}\n"
+    line = f"[{score:>2}] #{channel_name}  @{user_name}  ts={ts}  {preview}"
+    if reason:
+        line += f"\n     reason: {reason}"
+    return line + "\n"
 
 
 def run_eval(
@@ -127,7 +148,7 @@ def run_eval(
                 user_name = slack.get_user_name(user_id)
                 ts = msg["ts"]
 
-                score = score_message(ollama_url, model, prompt, resolved_text)
+                score, reason = score_message(ollama_url, model, prompt, resolved_text)
                 total += 1
 
                 if score is None:
@@ -139,7 +160,7 @@ def run_eval(
                     )
                     continue
 
-                line = _format_line(score, channel_name, user_name, ts, resolved_text)
+                line = _format_line(score, reason, channel_name, user_name, ts, resolved_text)
 
                 if score >= GOOD_THRESHOLD:
                     good_f.write(line)
