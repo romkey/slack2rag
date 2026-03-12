@@ -32,6 +32,10 @@ class Config:
     thread_update_lookback_hours: int = 0
     reaction_boost_threshold: int = 3  # prepend "[highlighted by team]" at this many reactions
 
+    eval_test: bool = False
+    eval_prompt: str = ""
+    eval_model: str = ""
+
     @property
     def channel_list(self) -> List[str]:
         if self.slack_channels:
@@ -61,4 +65,7 @@ class Config:
             hybrid_search=_bool_env(os.environ.get("HYBRID_SEARCH", "false")),
             thread_update_lookback_hours=int(os.environ.get("THREAD_UPDATE_LOOKBACK_HOURS", "0")),
             reaction_boost_threshold=int(os.environ.get("REACTION_BOOST_THRESHOLD", "3")),
+            eval_test=bool(os.environ.get("EVAL_TEST", "")),
+            eval_prompt=os.environ.get("EVAL_PROMPT", ""),
+            eval_model=os.environ.get("EVAL_MODEL", ""),
         )

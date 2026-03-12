@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
+from .evaluator import run_eval
 from .processor import (
     ChannelStats,
     Document,
@@ -354,6 +355,18 @@ def main() -> None:
     slack = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause)
     slack.prefetch_users()
     slack.fetch_workspace_url()
+
+    if cfg.eval_test:
+        if not cfg.eval_prompt:
+            logger.error("EVAL_TEST is set but EVAL_PROMPT is empty — nothing to evaluate against")
+            raise SystemExit(1)
+        if not cfg.eval_model:
+            logger.error("EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified")
+            raise SystemExit(1)
+        logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
+        channels = slack.get_public_channels(cfg.channel_list or None)
+        run_eval(cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack)
+        return
 
     try:
         embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
