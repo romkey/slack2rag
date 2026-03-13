@@ -15,6 +15,7 @@ class Config:
     qdrant_collection: str = "slack_messages"
 
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
+    slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
     ollama_url: str = "http://localhost:11434"
     ollama_embedding_model: str = "nomic-embed-text"
@@ -42,6 +43,12 @@ class Config:
             return [c.strip() for c in self.slack_channels.split(",") if c.strip()]
         return []
 
+    @property
+    def channel_blacklist(self) -> set[str]:
+        if self.slack_channel_blacklist:
+            return {c.strip().lstrip("#") for c in self.slack_channel_blacklist.split(",") if c.strip()}
+        return set()
+
     @classmethod
     def from_env(cls) -> "Config":
         token = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -52,6 +59,7 @@ class Config:
             qdrant_url=os.environ.get("QDRANT_URL", "http://qdrant:6333"),
             qdrant_collection=os.environ.get("QDRANT_COLLECTION", "slack_messages"),
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
+            slack_channel_blacklist=os.environ.get("SLACK_CHANNEL_BLACKLIST", ""),
             ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
             ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
             ollama_context_length=int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "8192")),

@@ -295,6 +295,22 @@ def _index_summaries(
     logger.info("Indexed %d summary documents", len(summary_docs))
 
 
+def _get_channels(cfg: Config, slack: SlackClient) -> List[dict]:
+    """Fetch channels, applying both the include list and the blacklist."""
+    channels = slack.get_public_channels(cfg.channel_list or None)
+    blacklist = cfg.channel_blacklist
+    if blacklist and channels:
+        before = len(channels)
+        channels = [
+            ch for ch in channels
+            if ch.get("name", "") not in blacklist and ch["id"] not in blacklist
+        ]
+        skipped = before - len(channels)
+        if skipped:
+            logger.info("Blacklist: skipping %d channel(s): %s", skipped, ", ".join(sorted(blacklist)))
+    return channels
+
+
 def run_once(
     cfg: Config,
     slack: SlackClient,
@@ -303,7 +319,7 @@ def run_once(
     sparse_encoder: Optional[SparseEncoder],
     state: SyncState,
 ) -> None:
-    channels = slack.get_public_channels(cfg.channel_list or None)
+    channels = _get_channels(cfg, slack)
     if not channels:
         logger.warning("No accessible public channels found")
         return
@@ -364,7 +380,7 @@ def main() -> None:
             logger.error("EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified")
             raise SystemExit(1)
         logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
-        channels = slack.get_public_channels(cfg.channel_list or None)
+        channels = _get_channels(cfg, slack)
         run_eval(cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack)
         return
 
