@@ -18,6 +18,7 @@ class Config:
     slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
     ollama_url: str = "http://localhost:11434"
+    ollama_api_key: str = ""  # optional; sent as Bearer token when set
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_context_length: int = 8192  # model context window in tokens; 0 = no truncation
 
@@ -61,6 +62,7 @@ class Config:
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
             slack_channel_blacklist=os.environ.get("SLACK_CHANNEL_BLACKLIST", ""),
             ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+            ollama_api_key=os.environ.get("OLLAMA_API_KEY", ""),
             ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
             ollama_context_length=int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "8192")),
             sync_interval_minutes=int(os.environ.get("SYNC_INTERVAL_MINUTES", "60")),

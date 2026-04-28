@@ -116,9 +116,10 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
 class Embedder:
     """Generate dense embeddings via an Ollama server."""
 
-    def __init__(self, url: str, model: str, context_length: int = 0) -> None:
+    def __init__(self, url: str, model: str, context_length: int = 0, api_key: str = "") -> None:
         self._url = url.rstrip("/")
         self._model = model
+        self._api_key = api_key
         self._dimension: int | None = None
         self._max_chars = context_length * 3 if context_length > 0 else 0
 
@@ -207,10 +208,13 @@ class Embedder:
                 "model": self._model,
                 "input": batch,
             }).encode()
+            headers = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
             req = urllib.request.Request(
                 endpoint,
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             )
             try:
                 with urllib.request.urlopen(req, timeout=120) as resp:

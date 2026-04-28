@@ -381,12 +381,14 @@ def main() -> None:
             raise SystemExit(1)
         logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
         channels = _get_channels(cfg, slack)
-        run_eval(cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack)
+        run_eval(cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
+                 api_key=cfg.ollama_api_key)
         return
 
     try:
         embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
-                            context_length=cfg.ollama_context_length)
+                            context_length=cfg.ollama_context_length,
+                            api_key=cfg.ollama_api_key)
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)
         raise SystemExit(1) from exc

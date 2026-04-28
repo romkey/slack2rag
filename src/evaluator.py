@@ -26,6 +26,7 @@ RESULTS_DIR = "/results"
 
 def score_message(
     ollama_url: str, model: str, prompt: str, message: str,
+    api_key: str = "",
 ) -> tuple[int | None, str]:
     """Ask the LLM to score *message* using *prompt*.
 
@@ -46,10 +47,13 @@ def score_message(
         "format": "json",
     }).encode()
 
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         endpoint,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
 
     try:
@@ -120,6 +124,7 @@ def run_eval(
     prompt: str,
     channels: List[dict],
     slack,
+    api_key: str = "",
 ) -> None:
     """Score every message in every channel and write results to files."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -152,7 +157,7 @@ def run_eval(
                 user_name = slack.get_user_name(user_id)
                 ts = msg["ts"]
 
-                score, reason = score_message(ollama_url, model, prompt, resolved_text)
+                score, reason = score_message(ollama_url, model, prompt, resolved_text, api_key=api_key)
                 total += 1
 
                 if score is None:
