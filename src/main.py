@@ -372,6 +372,7 @@ def main() -> None:
     logger.info("Starting slack2rag v%s", __version__)
     logger.info("  Qdrant:         %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
     logger.info("  Ollama:         %s / %s", cfg.ollama_url, cfg.ollama_embedding_model)
+    logger.info("  Embed prefix:   %s", repr(cfg.ollama_embedding_prefix) if cfg.ollama_embedding_prefix else "none")
     logger.info("  Hybrid search:  %s", cfg.hybrid_search)
     logger.info("  Channels:       %s", cfg.channel_list or "all public")
     logger.info("  Min msg length: %d chars", cfg.min_message_length)
@@ -411,7 +412,8 @@ def main() -> None:
     try:
         embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
                             context_length=cfg.ollama_context_length,
-                            api_key=cfg.ollama_api_key)
+                            api_key=cfg.ollama_api_key,
+                            input_prefix=cfg.ollama_embedding_prefix)
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)
         raise SystemExit(1) from exc

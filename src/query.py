@@ -122,7 +122,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
                             context_length=cfg.ollama_context_length,
-                            api_key=cfg.ollama_api_key)
+                            api_key=cfg.ollama_api_key,
+                            input_prefix=cfg.ollama_embedding_prefix)
     except EmbeddingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

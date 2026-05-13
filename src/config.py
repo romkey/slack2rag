@@ -22,6 +22,7 @@ class Config:
     ollama_url: str = "http://localhost:11434"
     ollama_api_key: str = ""  # optional; sent as Bearer token when set
     ollama_embedding_model: str = "nomic-embed-text"
+    ollama_embedding_prefix: str = ""  # optional prefix prepended to each embedding input
     ollama_context_length: int = 8192  # model context window in tokens; 0 = no truncation
 
     sync_interval_minutes: int = 60
@@ -67,6 +68,7 @@ class Config:
             ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
             ollama_api_key=os.environ.get("OLLAMA_API_KEY", ""),
             ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
+            ollama_embedding_prefix=os.environ.get("OLLAMA_EMBEDDING_PREFIX", ""),
             ollama_context_length=int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "8192")),
             sync_interval_minutes=int(os.environ.get("SYNC_INTERVAL_MINUTES", "60")),
             run_once=_bool_env(os.environ.get("RUN_ONCE", "false")),

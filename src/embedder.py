@@ -116,18 +116,28 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
 class Embedder:
     """Generate dense embeddings via an Ollama server."""
 
-    def __init__(self, url: str, model: str, context_length: int = 0, api_key: str = "") -> None:
+    def __init__(
+        self,
+        url: str,
+        model: str,
+        context_length: int = 0,
+        api_key: str = "",
+        input_prefix: str = "",
+    ) -> None:
         self._url = url.rstrip("/")
         self._model = model
         self._api_key = api_key
+        self._input_prefix = input_prefix
         self._dimension: int | None = None
         self._max_chars = context_length * 3 if context_length > 0 else 0
 
         logger.info("Connecting to Ollama at %s  model: %s", self._url, model)
+        if self._input_prefix:
+            logger.info("  embedding input prefix: %r", self._input_prefix)
         if self._max_chars:
             logger.info("  context limit: %d tokens (~%d chars)", context_length, self._max_chars)
         try:
-            probe = self._call_api(["dimension probe"])
+            probe = self._call_api(self._prepare_texts(["dimension probe"]))
         except EmbeddingError:
             raise
         except Exception as exc:
@@ -154,8 +164,7 @@ class Embedder:
         if not texts:
             return []
 
-        if self._max_chars:
-            texts = [_truncate_at_word(t, self._max_chars) for t in texts]
+        texts = self._prepare_texts(texts)
 
         try:
             return self._call_api(texts)
@@ -168,6 +177,14 @@ class Embedder:
             return [self._embed_single(t) for t in texts]
 
     # ── internals ──────────────────────────────────────────────────────────
+
+    def _prepare_texts(self, texts: List[str]) -> List[str]:
+        """Apply model-specific input formatting and context truncation."""
+        if self._input_prefix:
+            texts = [f"{self._input_prefix}{text}" for text in texts]
+        if self._max_chars:
+            texts = [_truncate_at_word(t, self._max_chars) for t in texts]
+        return texts
 
     def _embed_single(self, text: str) -> List[float]:
         """Embed a single text, halving it on each retry if it's too long."""

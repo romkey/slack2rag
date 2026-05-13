@@ -86,6 +86,7 @@ All configuration is via environment variables (or `.env`).
 | `QDRANT_COLLECTION` | `slack_messages` | Collection name |
 | `OLLAMA_URL` | `http://ollama:11434` | Ollama server URL |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model for embeddings |
+| `OLLAMA_EMBEDDING_PREFIX` | *(empty)* | Optional prefix prepended to every embedding input, e.g. `search_document:` |
 | `SYNC_INTERVAL_MINUTES` | `60` | Minutes between syncs |
 | `RUN_ONCE` | `false` | Exit after one sync (for cron/k8s jobs) |
 | `BATCH_SIZE` | `50` | Messages embedded per batch |
