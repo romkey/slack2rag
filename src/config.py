@@ -14,6 +14,8 @@ class Config:
     qdrant_url: str = "http://qdrant:6333"
     qdrant_collection: str = "slack_messages"
 
+    database_url: str = ""  # optional PostgreSQL (DATABASE_URL); empty disables
+
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
     slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
@@ -59,6 +61,7 @@ class Config:
             slack_bot_token=token,
             qdrant_url=os.environ.get("QDRANT_URL", "http://qdrant:6333"),
             qdrant_collection=os.environ.get("QDRANT_COLLECTION", "slack_messages"),
+            database_url=os.environ.get("DATABASE_URL", ""),
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
             slack_channel_blacklist=os.environ.get("SLACK_CHANNEL_BLACKLIST", ""),
             ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),

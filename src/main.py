@@ -35,6 +35,7 @@ from .processor import (
     build_user_summary,
     build_team_summary,
 )
+from .pg_store import PgStore
 from .slack_client import SlackClient
 from .state import SyncState
 from .vector_store import VectorStore
@@ -58,7 +59,6 @@ def _build_docs_for_message(
 ) -> List[Document]:
     """Build Documents from a single message, enriched with full metadata."""
     ts = msg["ts"]
-    thread_ts = msg.get("thread_ts") or ts
 
     reaction_count, reactions = slack.get_reactions(msg)
     attachments = slack.get_attachments(msg)
@@ -97,6 +97,7 @@ def sync_channel(
     sparse_encoder: Optional[SparseEncoder],
     state: SyncState,
     cfg: Config,
+    pg: Optional[PgStore] = None,
 ) -> tuple[int, ChannelStats]:
     """Sync one channel.  Returns (documents_indexed, channel_stats)."""
     channel_id = channel["id"]
@@ -137,6 +138,9 @@ def sync_channel(
             if ruid != "unknown":
                 stats.user_counts[ruid] += 1
 
+        if pg:
+            pg.persist_channel_messages_and_users(slack, channel, msg, replies)
+
         docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
         pending_docs.extend(docs)
 
@@ -164,6 +168,7 @@ def refresh_threads(
     sparse_encoder: Optional[SparseEncoder],
     cfg: Config,
     lookback_hours: int,
+    pg: Optional[PgStore] = None,
 ) -> int:
     """Re-index threads in *channel* that received new replies recently.
 
@@ -193,6 +198,8 @@ def refresh_threads(
             continue
 
         replies = slack.get_thread_replies(channel_id, ts)
+        if pg:
+            pg.persist_channel_messages_and_users(slack, channel, msg, replies)
         docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
         pending_docs.extend(docs)
         refreshed += 1
@@ -318,6 +325,7 @@ def run_once(
     embedder: Embedder,
     sparse_encoder: Optional[SparseEncoder],
     state: SyncState,
+    pg: Optional[PgStore] = None,
 ) -> None:
     channels = _get_channels(cfg, slack)
     if not channels:
@@ -329,7 +337,9 @@ def run_once(
 
     total = 0
     for ch in channels:
-        count, new_stats = sync_channel(ch, slack, store, embedder, sparse_encoder, state, cfg)
+        count, new_stats = sync_channel(
+            ch, slack, store, embedder, sparse_encoder, state, cfg, pg=pg,
+        )
         total += count
         cid = ch["id"]
         if cid in all_stats:
@@ -343,8 +353,10 @@ def run_once(
         logger.info("Starting thread-update refresh pass (%dh lookback)…",
                      cfg.thread_update_lookback_hours)
         for ch in channels:
-            refresh_threads(ch, slack, store, embedder, sparse_encoder, cfg,
-                            cfg.thread_update_lookback_hours)
+            refresh_threads(
+                ch, slack, store, embedder, sparse_encoder, cfg,
+                cfg.thread_update_lookback_hours, pg=pg,
+            )
 
     _index_summaries(
         channels, all_stats, slack.get_user_profiles(),
@@ -367,10 +379,19 @@ def main() -> None:
                 f"{cfg.thread_update_lookback_hours}h lookback"
                 if cfg.thread_update_lookback_hours else "disabled")
     logger.info("  Run once:       %s", cfg.run_once)
+    logger.info(
+        "  PostgreSQL:     %s",
+        "enabled" if cfg.database_url else "disabled",
+    )
 
     slack = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause)
     slack.prefetch_users()
     slack.fetch_workspace_url()
+
+    pg = PgStore.from_url(cfg.database_url)
+    if pg:
+        pg.init_schema()
+        pg.bulk_upsert_users(slack.user_records())
 
     if cfg.eval_test:
         if not cfg.eval_prompt:
@@ -381,8 +402,10 @@ def main() -> None:
             raise SystemExit(1)
         logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
         channels = _get_channels(cfg, slack)
-        run_eval(cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
-                 api_key=cfg.ollama_api_key)
+        run_eval(
+            cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
+            api_key=cfg.ollama_api_key, pg=pg,
+        )
         return
 
     try:
@@ -404,13 +427,13 @@ def main() -> None:
     state = SyncState(cfg.state_file)
 
     if cfg.run_once:
-        run_once(cfg, slack, store, embedder, sparse_encoder, state)
+        run_once(cfg, slack, store, embedder, sparse_encoder, state, pg=pg)
         return
 
     interval = cfg.sync_interval_minutes * 60
     while True:
         try:
-            run_once(cfg, slack, store, embedder, sparse_encoder, state)
+            run_once(cfg, slack, store, embedder, sparse_encoder, state, pg=pg)
         except EmbeddingError as exc:
             logger.error("Sync cycle failed (embedding error): %s", exc)
         except Exception:

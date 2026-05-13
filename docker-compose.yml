@@ -65,7 +65,25 @@ services:
       OLLAMA_URL: http://ollama:11434
     command: ["python", "-m", "src.query"]
 
+  postgres:
+    image: postgres:16-alpine
+    profiles: [postgres]
+    environment:
+      POSTGRES_USER: slack2rag
+      POSTGRES_PASSWORD: slack2rag
+      POSTGRES_DB: slack2rag
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slack2rag -d slack2rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   qdrant_data:
   slack2rag_state:
   ollama_data:
+  postgres_data:

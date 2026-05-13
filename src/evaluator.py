@@ -15,7 +15,9 @@ import os
 import re
 import urllib.request
 import urllib.error
-from typing import List
+from typing import List, Optional
+
+from .pg_store import PgStore
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,7 @@ def run_eval(
     channels: List[dict],
     slack,
     api_key: str = "",
+    pg: Optional[PgStore] = None,
 ) -> None:
     """Score every message in every channel and write results to files."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -147,7 +150,18 @@ def run_eval(
             channel_name = ch.get("name", channel_id)
             logger.info("Eval: scanning #%s …", channel_name)
 
+            if pg:
+                pg.upsert_channel(ch)
+
             for msg in slack.get_channel_messages(channel_id, oldest_ts=None):
+                if pg:
+                    pg.upsert_message(channel_id, msg)
+                    uid = msg.get("user")
+                    if uid and isinstance(uid, str):
+                        rec = slack.get_user_record(uid)
+                        if rec:
+                            pg.upsert_user(rec)
+
                 raw_text = msg.get("text", "").strip()
                 if not raw_text:
                     continue

@@ -129,7 +129,7 @@ def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> Lis
                 overlap_len += len(prev_line) + 1
 
             current_lines = overlap_lines
-            current_len = sum(len(l) for l in current_lines) + max(len(current_lines) - 1, 0)
+            current_len = sum(len(cl) for cl in current_lines) + max(len(current_lines) - 1, 0)
 
         # Handle single lines longer than max_chars with hard split
         if len(line) > max_chars and not current_lines:
@@ -488,7 +488,6 @@ def build_workspace_summary(
     "where should I ask about X?", or "how many channels are there?"
     """
     total_messages = sum(channel_counts.values())
-    total_members = sum(ch.get("num_members", 0) for ch in channels)
 
     lines = [
         f"This Slack workspace has {len(channels)} indexed public channel{'s' if len(channels) != 1 else ''} "

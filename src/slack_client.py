@@ -29,6 +29,7 @@ class SlackClient:
         self._client = WebClient(token=token)
         self._user_cache: Dict[str, str] = {}
         self._user_profiles: Dict[str, dict] = {}
+        self._user_raw: Dict[str, dict] = {}
         self._api_pause = api_pause
         self._workspace_url: Optional[str] = None
 
@@ -229,6 +230,7 @@ class SlackClient:
 
             for user in resp.get("members", []):
                 uid = user["id"]
+                self._user_raw[uid] = user
                 profile = user.get("profile", {})
                 name = (
                     profile.get("display_name")
@@ -247,26 +249,42 @@ class SlackClient:
 
         logger.info("Prefetched %d user names", count)
 
-    def get_user_name(self, user_id: str) -> str:
-        """Return a display name for *user_id*, with caching."""
-        if user_id in self._user_cache:
-            return self._user_cache[user_id]
+    def get_user_record(self, user_id: str) -> Optional[dict]:
+        """Return the full Slack user object for *user_id*, fetching if needed."""
+        if user_id in self._user_raw:
+            return self._user_raw[user_id]
 
         try:
             resp = self._client.users_info(user=user_id)
             self._pace()
-            profile = resp["user"].get("profile", {})
-            name = (
-                profile.get("display_name")
-                or profile.get("real_name")
-                or resp["user"].get("name")
-                or user_id
-            )
+            user = resp["user"]
         except SlackApiError:
-            name = user_id
+            return None
 
+        self._user_raw[user_id] = user
+        profile = user.get("profile", {})
+        name = (
+            profile.get("display_name")
+            or profile.get("real_name")
+            or user.get("name")
+            or user_id
+        )
         self._user_cache[user_id] = name
-        return name
+        self._user_profiles[user_id] = self._extract_profile(user)
+        return user
+
+    def get_user_name(self, user_id: str) -> str:
+        """Return a display name for *user_id*, with caching."""
+        if user_id in self._user_cache:
+            return self._user_cache[user_id]
+        if self.get_user_record(user_id) is not None:
+            return self._user_cache[user_id]
+        self._user_cache[user_id] = user_id
+        return user_id
+
+    def user_records(self) -> List[dict]:
+        """Return full user dicts seen via prefetch or users.info (for bulk export)."""
+        return list(self._user_raw.values())
 
     def get_user_profiles(self) -> Dict[str, dict]:
         """Return all cached user profiles (populated by prefetch_users)."""
