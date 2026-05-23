@@ -13,10 +13,13 @@ services:
       timeout: 5s
       retries: 5
 
-  # Ollama provides embedding models.  Pull your model after first start:
+  # Ollama provides embedding (and optionally chat) models via its
+  # OpenAI-compatible /v1 API.  Pull your model after first start:
   #   docker compose exec ollama ollama pull nomic-embed-text
   # If you already have Ollama running on the host, comment this out and
-  # set OLLAMA_URL=http://host.docker.internal:11434 in .env instead.
+  # set LLM_BASE_URL=http://host.docker.internal:11434/v1 in .env instead.
+  # To use OpenAI (or any other OpenAI-compatible provider) instead, comment
+  # this service out and set LLM_BASE_URL / LLM_API_KEY in .env.
   ollama:
     image: ollama/ollama:latest
     ports:
@@ -39,7 +42,7 @@ services:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
-      OLLAMA_URL: http://ollama:11434
+      LLM_BASE_URL: http://ollama:11434/v1
     volumes:
       - slack2rag_state:/data
     restart: unless-stopped
@@ -62,7 +65,7 @@ services:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
-      OLLAMA_URL: http://ollama:11434
+      LLM_BASE_URL: http://ollama:11434/v1
     command: ["python", "-m", "src.query"]
 
   postgres:

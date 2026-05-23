@@ -19,11 +19,14 @@ class Config:
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
     slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
-    ollama_url: str = "http://localhost:11434"
-    ollama_api_key: str = ""  # optional; sent as Bearer token when set
-    ollama_embedding_model: str = "nomic-embed-text"
-    ollama_embedding_prefix: str = ""  # optional prefix prepended to each embedding input
-    ollama_context_length: int = 8192  # model context window in tokens; 0 = no truncation
+    # OpenAI-compatible inference endpoint (works with OpenAI, Ollama's /v1
+    # compatibility layer, llama.cpp server, vLLM, LM Studio, etc.).
+    llm_base_url: str = "http://localhost:11434/v1"
+    llm_api_key: str = ""  # sent as Bearer token; some servers require any non-empty value
+
+    embedding_model: str = "nomic-embed-text"
+    embedding_prefix: str = ""  # optional prefix prepended to each embedding input
+    embedding_context_length: int = 8192  # model context window in tokens; 0 = no truncation
 
     sync_interval_minutes: int = 60
     run_once: bool = False
@@ -40,6 +43,10 @@ class Config:
     eval_test: bool = False
     eval_prompt: str = ""
     eval_model: str = ""
+    # Optional separate endpoint for the evaluator LLM.  When empty, reuses
+    # llm_base_url / llm_api_key.
+    eval_base_url: str = ""
+    eval_api_key: str = ""
 
     @property
     def channel_list(self) -> List[str]:
@@ -53,6 +60,14 @@ class Config:
             return {c.strip().lstrip("#") for c in self.slack_channel_blacklist.split(",") if c.strip()}
         return set()
 
+    @property
+    def effective_eval_base_url(self) -> str:
+        return self.eval_base_url or self.llm_base_url
+
+    @property
+    def effective_eval_api_key(self) -> str:
+        return self.eval_api_key or self.llm_api_key
+
     @classmethod
     def from_env(cls) -> "Config":
         token = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -65,11 +80,11 @@ class Config:
             database_url=os.environ.get("DATABASE_URL", ""),
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
             slack_channel_blacklist=os.environ.get("SLACK_CHANNEL_BLACKLIST", ""),
-            ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
-            ollama_api_key=os.environ.get("OLLAMA_API_KEY", ""),
-            ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
-            ollama_embedding_prefix=os.environ.get("OLLAMA_EMBEDDING_PREFIX", ""),
-            ollama_context_length=int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "8192")),
+            llm_base_url=os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1"),
+            llm_api_key=os.environ.get("LLM_API_KEY", ""),
+            embedding_model=os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"),
+            embedding_prefix=os.environ.get("EMBEDDING_PREFIX", ""),
+            embedding_context_length=int(os.environ.get("EMBEDDING_CONTEXT_LENGTH", "8192")),
             sync_interval_minutes=int(os.environ.get("SYNC_INTERVAL_MINUTES", "60")),
             run_once=_bool_env(os.environ.get("RUN_ONCE", "false")),
             state_file=os.environ.get("STATE_FILE", "/data/state.json"),
@@ -83,4 +98,6 @@ class Config:
             eval_test=bool(os.environ.get("EVAL_TEST", "")),
             eval_prompt=os.environ.get("EVAL_PROMPT", ""),
             eval_model=os.environ.get("EVAL_MODEL", ""),
+            eval_base_url=os.environ.get("EVAL_BASE_URL", ""),
+            eval_api_key=os.environ.get("EVAL_API_KEY", ""),
         )

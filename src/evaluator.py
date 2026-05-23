@@ -1,9 +1,9 @@
 """
-Message quality evaluator using an Ollama LLM.
+Message quality evaluator using an OpenAI-compatible chat-completions LLM.
 
-Sends each Slack message along with a user-supplied prompt to an Ollama
-model and expects a JSON response with ``score`` (1–10) and ``reason``.
-Messages scoring >= 7 are written to /results/good.txt; the rest go to
+Sends each Slack message along with a user-supplied prompt to an LLM and
+expects a JSON response with ``score`` (1–10) and ``reason``.  Messages
+scoring >= 7 are written to /results/good.txt; the rest go to
 /results/bad.txt.
 """
 
@@ -26,8 +26,61 @@ GOOD_THRESHOLD = 7
 RESULTS_DIR = "/results"
 
 
+def _chat_completion(
+    base_url: str,
+    api_key: str,
+    model: str,
+    user_content: str,
+    timeout: int = 120,
+) -> Optional[str]:
+    """Call /chat/completions and return the assistant's content string.
+
+    Returns None on any HTTP/transport error (already logged).
+    """
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": user_content}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0,
+        "stream": False,
+    }).encode()
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode(errors="replace").strip()
+        except Exception:
+            pass
+        logger.error(
+            "LLM returned HTTP %d for %s (model %r): %s",
+            exc.code, endpoint, model, body,
+        )
+        return None
+    except urllib.error.URLError as exc:
+        logger.error("Could not reach LLM at %s: %s", base_url, exc.reason)
+        return None
+
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        logger.error(
+            "Unexpected chat-completions response shape from %s: %s",
+            endpoint, json.dumps(data)[:300],
+        )
+        return None
+
+
 def score_message(
-    ollama_url: str, model: str, prompt: str, message: str,
+    base_url: str, model: str, prompt: str, message: str,
     api_key: str = "",
 ) -> tuple[int | None, str]:
     """Ask the LLM to score *message* using *prompt*.
@@ -41,42 +94,10 @@ def score_message(
         'Respond with JSON: {"score": <1-10>, "reason": "<brief reason>"}'
     )
 
-    endpoint = f"{ollama_url.rstrip('/')}/api/generate"
-    payload = json.dumps({
-        "model": model,
-        "prompt": full_prompt,
-        "stream": False,
-        "format": "json",
-    }).encode()
-
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers=headers,
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode(errors="replace").strip()
-        except Exception:
-            pass
-        logger.error(
-            "Ollama returned HTTP %d for eval model %r: %s",
-            exc.code, model, body,
-        )
+    response_text = _chat_completion(base_url, api_key, model, full_prompt)
+    if response_text is None:
         return None, ""
-    except urllib.error.URLError as exc:
-        logger.error("Could not reach Ollama at %s: %s", ollama_url, exc.reason)
-        return None, ""
-
-    response_text = data.get("response", "").strip()
+    response_text = response_text.strip()
 
     try:
         result = json.loads(response_text)
@@ -121,7 +142,7 @@ def _format_line(
 
 
 def run_eval(
-    ollama_url: str,
+    base_url: str,
     model: str,
     prompt: str,
     channels: List[dict],
@@ -134,7 +155,7 @@ def run_eval(
     good_path = os.path.join(RESULTS_DIR, "good.txt")
     bad_path = os.path.join(RESULTS_DIR, "bad.txt")
 
-    logger.info("Eval mode: scoring messages with model %r", model)
+    logger.info("Eval mode: scoring messages with model %r at %s", model, base_url)
     logger.info("  Prompt: %.200s", prompt)
     logger.info("  Threshold: >= %d → %s, < %d → %s",
                 GOOD_THRESHOLD, good_path, GOOD_THRESHOLD, bad_path)
@@ -171,7 +192,7 @@ def run_eval(
                 user_name = slack.get_user_name(user_id)
                 ts = msg["ts"]
 
-                score, reason = score_message(ollama_url, model, prompt, resolved_text, api_key=api_key)
+                score, reason = score_message(base_url, model, prompt, resolved_text, api_key=api_key)
                 total += 1
 
                 if score is None:

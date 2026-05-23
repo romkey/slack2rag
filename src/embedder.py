@@ -1,10 +1,12 @@
 """
-Generates dense vector embeddings via Ollama, with optional sparse encoding
-for hybrid search.
+Generates dense vector embeddings via an OpenAI-compatible inference
+endpoint, with optional sparse encoding for hybrid search.
 
 Dense embeddings:
-  Ollama REST API (/api/embed) — uses whatever model is pulled on the
-  Ollama server.  No PyTorch or heavy ML libraries needed in this process.
+  POST {base_url}/embeddings — works with OpenAI itself, Ollama's /v1
+  compatibility layer, llama.cpp's server, vLLM, LM Studio, and any
+  other OpenAI-compatible provider.  No PyTorch or heavy ML libraries
+  needed in this process.
 
 Sparse encoding:
   A lightweight BM25-like tokenizer that maps terms to hashed bucket
@@ -85,15 +87,19 @@ class SparseEncoder:
         }
 
 
-# ── Ollama embedder ──────────────────────────────────────────────────────────
+# ── OpenAI-compatible embedder ────────────────────────────────────────────────
 
-_CONTEXT_ERROR_FRAGMENTS = ("context length", "too long", "exceeds")
+_CONTEXT_ERROR_FRAGMENTS = (
+    "context length", "context window", "too long", "exceeds",
+    "maximum context", "maximum tokens", "maximum_context",
+    "context_length_exceeded",
+)
 _MIN_TEXT_LEN = 64
 
 
 def _is_context_length_error(http_exc: urllib.error.HTTPError) -> bool:
-    """Return True if the HTTP error is Ollama complaining about input length."""
-    if http_exc.code != 400:
+    """Return True if the HTTP error is the server complaining about input length."""
+    if http_exc.code not in (400, 413, 422):
         return False
     try:
         body = http_exc.read().decode(errors="replace").lower()
@@ -114,24 +120,24 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
 
 
 class Embedder:
-    """Generate dense embeddings via an Ollama server."""
+    """Generate dense embeddings via an OpenAI-compatible inference server."""
 
     def __init__(
         self,
-        url: str,
+        base_url: str,
         model: str,
         context_length: int = 0,
         api_key: str = "",
         input_prefix: str = "",
     ) -> None:
-        self._url = url.rstrip("/")
+        self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._input_prefix = input_prefix
         self._dimension: int | None = None
         self._max_chars = context_length * 3 if context_length > 0 else 0
 
-        logger.info("Connecting to Ollama at %s  model: %s", self._url, model)
+        logger.info("Connecting to LLM at %s  embedding model: %s", self._base_url, model)
         if self._input_prefix:
             logger.info("  embedding input prefix: %r", self._input_prefix)
         if self._max_chars:
@@ -142,10 +148,10 @@ class Embedder:
             raise
         except Exception as exc:
             raise EmbeddingError(
-                f"Failed to connect to Ollama at {self._url} with model {model!r}: {exc}"
+                f"Failed to connect to LLM at {self._base_url} with model {model!r}: {exc}"
             ) from exc
         self._dimension = len(probe[0])
-        logger.info("Ollama embedding dimension: %d", self._dimension)
+        logger.info("Embedding dimension: %d", self._dimension)
 
     @property
     def dimension(self) -> int:
@@ -158,7 +164,7 @@ class Embedder:
         """Return a list of float vectors, one per input text.
 
         Pre-truncates texts to the configured context limit, and
-        automatically retries with shorter input if Ollama still
+        automatically retries with shorter input if the server still
         rejects any text for exceeding its context window.
         """
         if not texts:
@@ -214,9 +220,12 @@ class Embedder:
                 )
 
     def _call_api(self, texts: List[str]) -> List[List[float]]:
-        """Call Ollama's /api/embed endpoint.  Raises _ContextLengthError
-        for context-window rejections, EmbeddingError for everything else."""
-        endpoint = f"{self._url}/api/embed"
+        """Call the OpenAI-compatible /embeddings endpoint.
+
+        Raises _ContextLengthError for context-window rejections,
+        EmbeddingError for everything else.
+        """
+        endpoint = f"{self._base_url}/embeddings"
         results: List[List[float]] = []
 
         for i in range(0, len(texts), 50):
@@ -247,18 +256,26 @@ class Embedder:
                 except Exception:
                     pass
                 raise EmbeddingError(
-                    f"Ollama returned HTTP {exc.code} ({exc.reason}) "
+                    f"LLM returned HTTP {exc.code} ({exc.reason}) "
                     f"for POST {endpoint} with model {self._model!r}"
                     + (f"\n  Response: {body}" if body else "")
                 ) from exc
             except urllib.error.URLError as exc:
                 raise EmbeddingError(
-                    f"Could not reach Ollama at {self._url}: {exc.reason}"
+                    f"Could not reach LLM at {self._base_url}: {exc.reason}"
                 ) from exc
 
-            results.extend(data["embeddings"])
+            try:
+                items = data["data"]
+                vectors = [item["embedding"] for item in items]
+            except (KeyError, TypeError) as exc:
+                raise EmbeddingError(
+                    f"Unexpected response shape from {endpoint}: "
+                    f"{json.dumps(data)[:300]}"
+                ) from exc
+            results.extend(vectors)
         return results
 
 
 class _ContextLengthError(EmbeddingError):
-    """Internal: Ollama rejected input as too long for the model's context."""
+    """Internal: server rejected input as too long for the model's context."""

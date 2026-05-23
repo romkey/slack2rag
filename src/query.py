@@ -120,10 +120,10 @@ def main(argv: list[str] | None = None) -> None:
     cfg = Config.from_env()
 
     try:
-        embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
-                            context_length=cfg.ollama_context_length,
-                            api_key=cfg.ollama_api_key,
-                            input_prefix=cfg.ollama_embedding_prefix)
+        embedder = Embedder(base_url=cfg.llm_base_url, model=cfg.embedding_model,
+                            context_length=cfg.embedding_context_length,
+                            api_key=cfg.llm_api_key,
+                            input_prefix=cfg.embedding_prefix)
     except EmbeddingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

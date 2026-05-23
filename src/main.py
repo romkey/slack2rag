@@ -14,9 +14,11 @@ Flow per sync cycle
 9. Sleep until the next cycle (or exit if RUN_ONCE=true).
 """
 
+import argparse
 import json
 import logging
 import os
+import sys
 import time
 from collections import Counter
 from typing import List, Optional
@@ -25,7 +27,7 @@ from dotenv import load_dotenv
 
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
-from .evaluator import run_eval
+from .evaluator import _chat_completion, run_eval
 from .processor import (
     ChannelStats,
     Document,
@@ -365,14 +367,96 @@ def run_once(
     logger.info("Sync complete — %d documents indexed  (total in store: %d)", total, store.count())
 
 
-def main() -> None:
+def _check_llm(cfg: Config) -> bool:
+    """Verify the configured LLM endpoint(s) are reachable.
+
+    Returns True if every required check passed.  Always exercises the
+    embedding model; also exercises the evaluator model when EVAL_MODEL
+    is configured.  Logs the outcome of each check.
+    """
+    all_ok = True
+
+    logger.info("LLM connectivity check")
+    logger.info("  Embedding endpoint: %s", cfg.llm_base_url)
+    logger.info("  Embedding model:    %s", cfg.embedding_model)
+    try:
+        embedder = Embedder(
+            base_url=cfg.llm_base_url,
+            model=cfg.embedding_model,
+            context_length=cfg.embedding_context_length,
+            api_key=cfg.llm_api_key,
+            input_prefix=cfg.embedding_prefix,
+        )
+        vector = embedder.embed(["slack2rag connectivity check"])[0]
+        logger.info(
+            "  ✓ Embedding model OK (dimension=%d, sample[0]=%.4f)",
+            len(vector), vector[0] if vector else 0.0,
+        )
+    except Exception as exc:
+        logger.error("  ✗ Embedding model FAILED: %s", exc)
+        all_ok = False
+
+    if cfg.eval_model:
+        logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
+        logger.info("  Evaluator model:    %s", cfg.eval_model)
+        probe_prompt = (
+            "Reply with JSON only: {\"ok\": true}.  This is a connectivity check."
+        )
+        content = _chat_completion(
+            cfg.effective_eval_base_url,
+            cfg.effective_eval_api_key,
+            cfg.eval_model,
+            probe_prompt,
+            timeout=30,
+        )
+        if content is None:
+            logger.error("  ✗ Evaluator model FAILED (see error above)")
+            all_ok = False
+        else:
+            preview = content.strip().replace("\n", " ")[:120]
+            logger.info("  ✓ Evaluator model OK (response: %s)", preview)
+    else:
+        logger.info("  Evaluator: skipped (EVAL_MODEL not set)")
+
+    return all_ok
+
+
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    from . import __version__
+    parser = argparse.ArgumentParser(
+        prog="slack2rag",
+        description="Index Slack messages into Qdrant for RAG.",
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify connectivity to the embedding and evaluator LLMs, then exit. "
+             "Exit 0 on success, 1 on any failure.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = _parse_args(argv)
     cfg = Config.from_env()
 
     from . import __version__
     logger.info("Starting slack2rag v%s", __version__)
+
+    if args.check:
+        ok = _check_llm(cfg)
+        if ok:
+            logger.info("LLM check: SUCCESS")
+            sys.exit(0)
+        else:
+            logger.error("LLM check: FAILURE")
+            sys.exit(1)
+
     logger.info("  Qdrant:         %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
-    logger.info("  Ollama:         %s / %s", cfg.ollama_url, cfg.ollama_embedding_model)
-    logger.info("  Embed prefix:   %s", repr(cfg.ollama_embedding_prefix) if cfg.ollama_embedding_prefix else "none")
+    logger.info("  LLM:            %s", cfg.llm_base_url)
+    logger.info("  Embedding model: %s", cfg.embedding_model)
+    logger.info("  Embed prefix:   %s", repr(cfg.embedding_prefix) if cfg.embedding_prefix else "none")
     logger.info("  Hybrid search:  %s", cfg.hybrid_search)
     logger.info("  Channels:       %s", cfg.channel_list or "all public")
     logger.info("  Min msg length: %d chars", cfg.min_message_length)
@@ -402,18 +486,20 @@ def main() -> None:
             logger.error("EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified")
             raise SystemExit(1)
         logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
+        logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
+        logger.info("  Evaluator model:    %s", cfg.eval_model)
         channels = _get_channels(cfg, slack)
         run_eval(
-            cfg.ollama_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
-            api_key=cfg.ollama_api_key, pg=pg,
+            cfg.effective_eval_base_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
+            api_key=cfg.effective_eval_api_key, pg=pg,
         )
         return
 
     try:
-        embedder = Embedder(url=cfg.ollama_url, model=cfg.ollama_embedding_model,
-                            context_length=cfg.ollama_context_length,
-                            api_key=cfg.ollama_api_key,
-                            input_prefix=cfg.ollama_embedding_prefix)
+        embedder = Embedder(base_url=cfg.llm_base_url, model=cfg.embedding_model,
+                            context_length=cfg.embedding_context_length,
+                            api_key=cfg.llm_api_key,
+                            input_prefix=cfg.embedding_prefix)
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)
         raise SystemExit(1) from exc
