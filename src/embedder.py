@@ -122,6 +122,10 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
 class Embedder:
     """Generate dense embeddings via an OpenAI-compatible inference server."""
 
+    # Some OpenAI-compatible servers (notably Ollama's /v1 layer) accept an
+    # array input but silently return null embeddings for each item.  When
+    # we detect that, we drop to one-request-per-input mode for the rest
+    # of this Embedder's lifetime.
     def __init__(
         self,
         base_url: str,
@@ -129,6 +133,7 @@ class Embedder:
         context_length: int = 0,
         api_key: str = "",
         input_prefix: str = "",
+        request_batch_size: int = 50,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -136,6 +141,10 @@ class Embedder:
         self._input_prefix = input_prefix
         self._dimension: int | None = None
         self._max_chars = context_length * 3 if context_length > 0 else 0
+        self._request_batch_size = max(1, request_batch_size)
+        # Servers known to mishandle array inputs flip this to True after
+        # the first bad response and we send one input per request afterwards.
+        self._force_single_input = False
 
         logger.info("Connecting to LLM at %s  embedding model: %s", self._base_url, model)
         if self._input_prefix:
@@ -225,57 +234,131 @@ class Embedder:
         Raises _ContextLengthError for context-window rejections,
         EmbeddingError for everything else.
         """
-        endpoint = f"{self._base_url}/embeddings"
         results: List[List[float]] = []
 
-        for i in range(0, len(texts), 50):
-            batch = texts[i : i + 50]
-            payload = json.dumps({
-                "model": self._model,
-                "input": batch,
-            }).encode()
-            headers = {"Content-Type": "application/json"}
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
-            req = urllib.request.Request(
-                endpoint,
-                data=payload,
-                headers=headers,
-            )
+        chunk_size = 1 if self._force_single_input else self._request_batch_size
+        i = 0
+        while i < len(texts):
+            batch = texts[i : i + chunk_size]
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    data = json.loads(resp.read())
-            except urllib.error.HTTPError as exc:
-                if _is_context_length_error(exc):
-                    raise _ContextLengthError(
-                        f"Input exceeds context length for model {self._model!r}"
-                    ) from exc
-                body = ""
-                try:
-                    body = exc.read().decode(errors="replace").strip()
-                except Exception:
-                    pass
-                raise EmbeddingError(
-                    f"LLM returned HTTP {exc.code} ({exc.reason}) "
-                    f"for POST {endpoint} with model {self._model!r}"
-                    + (f"\n  Response: {body}" if body else "")
-                ) from exc
-            except urllib.error.URLError as exc:
-                raise EmbeddingError(
-                    f"Could not reach LLM at {self._base_url}: {exc.reason}"
-                ) from exc
-
-            try:
-                items = data["data"]
-                vectors = [item["embedding"] for item in items]
-            except (KeyError, TypeError) as exc:
-                raise EmbeddingError(
-                    f"Unexpected response shape from {endpoint}: "
-                    f"{json.dumps(data)[:300]}"
-                ) from exc
+                vectors = self._post_embeddings(batch)
+            except _MalformedBatchError:
+                # Server returned the right shape but null/invalid embeddings.
+                # Drop to single-input mode and retry this batch one at a time.
+                if len(batch) == 1:
+                    raise EmbeddingError(
+                        f"LLM at {self._base_url} returned an invalid embedding "
+                        f"for a single input with model {self._model!r}.  This "
+                        "usually means the model isn't an embedding model, the "
+                        "input was empty, or the server is misconfigured."
+                    )
+                logger.warning(
+                    "LLM returned null/invalid embeddings for a batch of %d; "
+                    "falling back to one-input-per-request for the rest of "
+                    "this run (some OpenAI-compatible servers, notably "
+                    "Ollama's /v1, mishandle array inputs).",
+                    len(batch),
+                )
+                self._force_single_input = True
+                chunk_size = 1
+                continue  # retry this same slice in single-input mode
             results.extend(vectors)
+            i += len(batch)
         return results
+
+    def _post_embeddings(self, batch: List[str]) -> List[List[float]]:
+        """Send one HTTP request and return validated embeddings.
+
+        Raises _ContextLengthError for context errors, _MalformedBatchError
+        when the response shape is right but values are null/invalid, and
+        EmbeddingError for anything else.
+        """
+        endpoint = f"{self._base_url}/embeddings"
+        payload = json.dumps({
+            "model": self._model,
+            "input": batch,
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        req = urllib.request.Request(endpoint, data=payload, headers=headers)
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            if _is_context_length_error(exc):
+                raise _ContextLengthError(
+                    f"Input exceeds context length for model {self._model!r}"
+                ) from exc
+            body = ""
+            try:
+                body = exc.read().decode(errors="replace").strip()
+            except Exception:
+                pass
+            raise EmbeddingError(
+                f"LLM returned HTTP {exc.code} ({exc.reason}) "
+                f"for POST {endpoint} with model {self._model!r}"
+                + (f"\n  Response: {body}" if body else "")
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise EmbeddingError(
+                f"Could not reach LLM at {self._base_url}: {exc.reason}"
+            ) from exc
+
+        return self._extract_embeddings(data, expected=len(batch), endpoint=endpoint)
+
+    def _extract_embeddings(
+        self, data: object, expected: int, endpoint: str,
+    ) -> List[List[float]]:
+        """Pull embedding vectors out of an OpenAI-shaped response.
+
+        Sorts items by their `index` field so callers see the same order
+        as the input regardless of how the server orders the response.
+        Raises _MalformedBatchError if any item is missing/null/invalid.
+        """
+        if not isinstance(data, dict) or "data" not in data or not isinstance(data["data"], list):
+            raise EmbeddingError(
+                f"Unexpected response shape from {endpoint}: "
+                f"{json.dumps(data)[:300]}"
+            )
+        items = data["data"]
+        if len(items) != expected:
+            raise EmbeddingError(
+                f"{endpoint} returned {len(items)} embedding(s) for {expected} "
+                f"input(s).  Response: {json.dumps(data)[:300]}"
+            )
+
+        ordered: List[List[float] | None] = [None] * expected
+        for slot, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise _MalformedBatchError()
+            idx = item.get("index", slot)
+            if not isinstance(idx, int) or idx < 0 or idx >= expected:
+                idx = slot
+            embedding = item.get("embedding")
+            if not _is_valid_embedding(embedding):
+                raise _MalformedBatchError()
+            ordered[idx] = embedding
+
+        if any(v is None for v in ordered):
+            raise _MalformedBatchError()
+        return ordered  # type: ignore[return-value]
+
+
+def _is_valid_embedding(value: object) -> bool:
+    """A valid embedding is a non-empty list of finite numbers."""
+    if not isinstance(value, list) or not value:
+        return False
+    for x in value:
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            return False
+    return True
 
 
 class _ContextLengthError(EmbeddingError):
     """Internal: server rejected input as too long for the model's context."""
+
+
+class _MalformedBatchError(Exception):
+    """Internal: response had the right shape but invalid embedding values."""
