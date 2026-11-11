@@ -10,35 +10,50 @@ import logging
 from typing import Any, Optional
 
 import psycopg
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
-DDL_STATEMENTS = [
-    """
-    CREATE TABLE IF NOT EXISTS slack_channels (
-        id TEXT PRIMARY KEY,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS slack_users (
-        id TEXT PRIMARY KEY,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS slack_messages (
-        channel_id TEXT NOT NULL REFERENCES slack_channels(id) ON DELETE CASCADE,
-        ts TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (channel_id, ts)
-    )
-    """,
-]
+
+class SchemaError(RuntimeError):
+    """The database schema isn't at the revision this version needs."""
+
+
+def _alembic_config(url: str) -> AlembicConfig:
+    """Alembic settings for DATABASE_URL, using the migrations in this package."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", "slack2rag:migrations")
+    # SQLAlchemy picks psycopg 3 only when asked; its default is psycopg2.
+    # set_main_option interpolates %, so a %-encoded password needs %%.
+    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url(url).replace("%", "%%"))
+    return cfg
+
+
+def sqlalchemy_url(url: str) -> str:
+    """postgresql://... (libpq form) to postgresql+psycopg://... for SQLAlchemy."""
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url.removeprefix(prefix)
+    return url
+
+
+def head_revision() -> str:
+    """The newest migration in this package."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", "slack2rag:migrations")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    if head is None:  # pragma: no cover - the package always ships migrations
+        raise SchemaError("no migrations found in slack2rag.migrations")
+    return head
+
+
+def migrate(url: str) -> None:
+    """Bring the database schema up to date (`slack2rag migrate`)."""
+    alembic_command.upgrade(_alembic_config(url), "head")
+    logger.info("PostgreSQL schema is at revision %s", head_revision())
 
 
 class PgStore:
@@ -53,12 +68,24 @@ class PgStore:
             return None
         return PgStore(url.strip())
 
-    def init_schema(self) -> None:
+    def schema_revision(self) -> str | None:
+        """The migration the database is at, or None if it has never been migrated."""
         with psycopg.connect(self._conninfo) as conn:
-            for stmt in DDL_STATEMENTS:
-                conn.execute(stmt)
-            conn.commit()
-        logger.info("PostgreSQL schema ready")
+            exists = conn.execute("SELECT to_regclass('alembic_version')").fetchone()
+            if exists is None or exists[0] is None:
+                return None
+            row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            return None if row is None else str(row[0])
+
+    def check_schema(self) -> None:
+        """Raise SchemaError unless `slack2rag migrate` has brought the schema up to date."""
+        revision = self.schema_revision()
+        head = head_revision()
+        if revision != head:
+            raise SchemaError(
+                f"PostgreSQL schema is at revision {revision or 'none'}, not "
+                f"{head}; run `slack2rag migrate` first"
+            )
 
     def upsert_channel(self, channel: dict[str, Any]) -> None:
         cid = channel.get("id")

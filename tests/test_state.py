@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from src.state import SyncState
+from slack2rag.state import SyncState
 
 
 def test_missing_file_starts_empty(tmp_path) -> None:
@@ -51,7 +51,7 @@ def test_loads_existing_file(tmp_path) -> None:
 def test_corrupt_file_logs_warning_and_starts_empty(tmp_path, caplog) -> None:
     path = tmp_path / "state.json"
     path.write_text("{not valid json")
-    with caplog.at_level(logging.WARNING, logger="src.state"):
+    with caplog.at_level(logging.WARNING, logger="slack2rag.state"):
         state = SyncState(str(path))
     assert state.get_cursor("C1") is None
     assert "Could not read state file" in caplog.text
@@ -65,7 +65,7 @@ def test_unreadable_path_logs_warning(tmp_path, caplog) -> None:
     # A directory exists at the path, so open() raises an OSError.
     path = tmp_path / "state.json"
     path.mkdir()
-    with caplog.at_level(logging.WARNING, logger="src.state"):
+    with caplog.at_level(logging.WARNING, logger="slack2rag.state"):
         state = SyncState(str(path))
     assert state.get_cursor("C1") is None
     assert "Could not read state file" in caplog.text
@@ -88,7 +88,7 @@ def test_save_with_bare_filename_uses_cwd(tmp_path, monkeypatch) -> None:
 def test_save_failure_logs_warning_but_keeps_memory(tmp_path, caplog) -> None:
     path = tmp_path / "state.json"
     path.mkdir()  # writing to a directory raises IsADirectoryError (OSError)
-    with caplog.at_level(logging.WARNING, logger="src.state"):
+    with caplog.at_level(logging.WARNING, logger="slack2rag.state"):
         state = SyncState(str(path))
         caplog.clear()
         state.set_cursor("C1", "1.0")

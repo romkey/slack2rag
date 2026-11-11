@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src import embedder as emb_mod
-from src.embedder import (
+from slack2rag import embedder as emb_mod
+from slack2rag.embedder import (
     SPARSE_VOCAB_SIZE,
     Embedder,
     EmbeddingError,

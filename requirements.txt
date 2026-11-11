@@ -1,5 +1,0 @@
-slack-sdk>=3.46.0
-qdrant-client>=1.20.0
-python-dotenv>=1.2.4
-tenacity>=9.2.1
-psycopg[binary]>=3.3.8

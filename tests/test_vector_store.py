@@ -10,9 +10,9 @@ from pydantic import ValidationError
 from qdrant_client.http import models as qmodels
 from tenacity import wait_none
 
-from src import vector_store
-from src.processor import Document
-from src.vector_store import VectorStore
+from slack2rag import vector_store
+from slack2rag.processor import Document
+from slack2rag.vector_store import VectorStore
 
 KEYWORD_FIELDS = ("channel_id", "channel_name", "date", "user_id", "doc_type", "source_system")
 

@@ -6,9 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src import __version__, query
-from src.embedder import EmbeddingError
-from src.query import _print_result, _score_bar
+from slack2rag import __version__, query
+from slack2rag.config import Config, ConfigError
+from slack2rag.embedder import EmbeddingError
+from slack2rag.query import _print_result, _score_bar
 
 
 @pytest.fixture
@@ -121,13 +122,14 @@ def test_version_flag(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         query.main(["--version"])
     assert exc.value.code == 0
-    assert __version__ in capsys.readouterr().out
+    assert f"slack2rag query {__version__}" in capsys.readouterr().out
 
 
 def test_requires_query(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         query.main([])
     assert exc.value.code == 2
+    assert "usage: slack2rag query" in capsys.readouterr().err
 
 
 def test_main_with_results_and_args(mocks, capsys) -> None:
@@ -136,10 +138,10 @@ def test_main_with_results_and_args(mocks, capsys) -> None:
         {"score": 0.4, "channel_name": "ops", "user_name": "b", "text": "second"},
     ]
 
-    query.main([
+    assert query.main([
         "-n", "2", "-c", "eng", "--date-from", "2024-01-01", "--date-to", "2024-12-31",
         "how", "do", "I", "deploy",
-    ])
+    ]) == 0
 
     out = capsys.readouterr().out
     assert 'Searching for: "how do I deploy"' in out
@@ -170,7 +172,7 @@ def test_main_with_results_and_args(mocks, capsys) -> None:
 
 def test_main_defaults_and_no_score(mocks, capsys) -> None:
     mocks["store"].search.return_value = [{"score": 0.9, "text": "x"}]
-    query.main(["--no-score", "hello"])
+    assert query.main(["--no-score", "hello"]) == 0
     out = capsys.readouterr().out
     assert "0.900" not in out
     assert "█" not in out
@@ -183,7 +185,7 @@ def test_main_defaults_and_no_score(mocks, capsys) -> None:
 def test_main_hybrid_uses_sparse_encoder(mocks, env, capsys) -> None:
     env.setenv("HYBRID_SEARCH", "true")
     mocks["store"].search.return_value = [{"score": 0.5, "text": "x"}]
-    query.main(["hello"])
+    assert query.main(["hello"]) == 0
     out = capsys.readouterr().out
     assert "(hybrid: dense + sparse)" in out
     mocks["sparse"].encode.assert_called_once_with(["hello"])
@@ -193,10 +195,8 @@ def test_main_hybrid_uses_sparse_encoder(mocks, env, capsys) -> None:
     }
 
 
-def test_main_no_results_exits_zero(mocks, capsys) -> None:
-    with pytest.raises(SystemExit) as exc:
-        query.main(["nothing"])
-    assert exc.value.code == 0
+def test_main_no_results_returns_zero(mocks, capsys) -> None:
+    assert query.main(["nothing"]) == 0
     out = capsys.readouterr().out
     assert "No results found." in out
     assert "score threshold" not in out
@@ -205,24 +205,33 @@ def test_main_no_results_exits_zero(mocks, capsys) -> None:
 
 def test_main_no_results_mentions_threshold(mocks, env, capsys) -> None:
     env.setenv("SCORE_THRESHOLD", "0.6")
-    with pytest.raises(SystemExit) as exc:
-        query.main(["nothing"])
-    assert exc.value.code == 0
+    assert query.main(["nothing"]) == 0
     out = capsys.readouterr().out
     assert "score threshold is set to 0.6" in out
     assert mocks["store"].search.call_args.kwargs["score_threshold"] == 0.6
 
 
-def test_main_embedder_error_exits_one(mocks, capsys) -> None:
+def test_main_embedder_error_returns_one(mocks, capsys) -> None:
     mocks["embedder_cls"].side_effect = EmbeddingError("cannot reach LLM")
-    with pytest.raises(SystemExit) as exc:
-        query.main(["hello"])
-    assert exc.value.code == 1
+    assert query.main(["hello"]) == 1
     assert "Error: cannot reach LLM" in capsys.readouterr().err
     mocks["store_cls"].assert_not_called()
 
 
 def test_main_missing_token(monkeypatch) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-    with pytest.raises(EnvironmentError, match="SLACK_BOT_TOKEN"):
+    with pytest.raises(ConfigError, match="SLACK_BOT_TOKEN"):
         query.main(["hello"])
+
+
+def test_main_uses_given_config_instead_of_env(mocks, monkeypatch, capsys) -> None:
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    cfg = Config(
+        slack_bot_token="xoxb-given", qdrant_url="http://given:6333",
+        qdrant_collection="given", llm_base_url="http://given/v1", embedding_model="m",
+    )
+    assert query.main(["hello"], cfg=cfg) == 0
+    mocks["store_cls"].assert_called_once_with(
+        url="http://given:6333", collection="given", dimension=3, hybrid=False,
+    )
+    assert mocks["embedder_cls"].call_args.kwargs["base_url"] == "http://given/v1"

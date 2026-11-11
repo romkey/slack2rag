@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 from slack_sdk.errors import SlackApiError
 
-from src import slack_client
-from src.slack_client import SlackClient
+from slack2rag import slack_client
+from slack2rag.slack_client import SlackClient
 
 
 def _err(code: str) -> SlackApiError:

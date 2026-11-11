@@ -2,25 +2,21 @@
 slack2rag query CLI
 
 Usage (inside Docker):
-  docker compose run --rm query "how do I set up SSO?"
-  docker compose run --rm query --limit 10 --channel engineering "deploy process"
-  docker compose run --rm query --date-from 2024-06-01 "incident postmortem"
+  docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "how do I set up SSO?"
 
 Usage (local, against a running Qdrant):
-  QDRANT_URL=http://localhost:6333 python -m src.query "your question here"
+  QDRANT_URL=http://localhost:6333 slack2rag query --limit 10 --channel engineering "deploy process"
 """
 
 import argparse
 import sys
 import textwrap
 
-from dotenv import load_dotenv
 
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder
 from .vector_store import VectorStore
 
-load_dotenv()
 
 _SCORE_BAR_WIDTH = 20
 
@@ -70,11 +66,12 @@ def _print_result(idx: int, hit: dict, show_score: bool) -> None:
     print()
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
+    """Search the index and print the results; returns the process exit code."""
     from . import __version__
 
     parser = argparse.ArgumentParser(
-        prog="query",
+        prog="slack2rag query",
         description="Semantic search over indexed Slack messages.",
     )
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -117,7 +114,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     query_text = " ".join(args.query)
 
-    cfg = Config.from_env()
+    if cfg is None:
+        cfg = Config.from_env()
 
     try:
         embedder = Embedder(base_url=cfg.llm_base_url, model=cfg.embedding_model,
@@ -126,7 +124,7 @@ def main(argv: list[str] | None = None) -> None:
                             input_prefix=cfg.embedding_prefix)
     except EmbeddingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
 
@@ -159,14 +157,11 @@ def main(argv: list[str] | None = None) -> None:
         print("No results found.")
         if cfg.score_threshold > 0:
             print(f"  (score threshold is set to {cfg.score_threshold} — try lowering it)")
-        sys.exit(0)
+        return 0
 
     total = store.count()
     print(f"Top {len(results)} of {total:,} indexed messages\n")
 
     for idx, hit in enumerate(results):
         _print_result(idx, hit, show_score=not args.no_score)
-
-
-if __name__ == "__main__":
-    main()
+    return 0

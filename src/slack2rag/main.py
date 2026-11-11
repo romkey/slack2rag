@@ -18,12 +18,12 @@ import argparse
 import json
 import logging
 import os
-import sys
+import signal
+import threading
 import time
 from collections import Counter
+from types import FrameType
 from typing import List, Optional
-
-from dotenv import load_dotenv
 
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
@@ -37,19 +37,15 @@ from .processor import (
     build_user_summary,
     build_team_summary,
 )
-from .pg_store import PgStore
+from .pg_store import PgStore, SchemaError
 from .slack_client import SlackClient
 from .state import SyncState
 from .vector_store import VectorStore
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
-logger = logging.getLogger("slack2rag")
+# Set by SIGTERM (`docker stop`) or Ctrl-C to end the sync loop between cycles.
+stop_event = threading.Event()
 
 
 def _build_docs_for_message(
@@ -437,21 +433,26 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def _request_stop(signum: int, frame: FrameType | None) -> None:
+    logger.info("Received signal %d; stopping after the current sync cycle", signum)
+    stop_event.set()
+
+
+def main(argv: Optional[List[str]] = None, cfg: Config | None = None) -> int:
+    """Run the indexer; returns the process exit code."""
     args = _parse_args(argv)
-    cfg = Config.from_env()
+    if cfg is None:
+        cfg = Config.from_env()
 
     from . import __version__
     logger.info("Starting slack2rag v%s", __version__)
 
     if args.check:
-        ok = _check_llm(cfg)
-        if ok:
+        if _check_llm(cfg):
             logger.info("LLM check: SUCCESS")
-            sys.exit(0)
-        else:
-            logger.error("LLM check: FAILURE")
-            sys.exit(1)
+            return 0
+        logger.error("LLM check: FAILURE")
+        return 1
 
     logger.info("  Qdrant:         %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
     logger.info("  LLM:            %s", cfg.llm_base_url)
@@ -475,16 +476,20 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     pg = PgStore.from_url(cfg.database_url)
     if pg:
-        pg.init_schema()
+        try:
+            pg.check_schema()
+        except SchemaError as exc:
+            logger.error("%s", exc)
+            return 1
         pg.bulk_upsert_users(slack.user_records())
 
     if cfg.eval_test:
         if not cfg.eval_prompt:
             logger.error("EVAL_TEST is set but EVAL_PROMPT is empty — nothing to evaluate against")
-            raise SystemExit(1)
+            return 1
         if not cfg.eval_model:
             logger.error("EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified")
-            raise SystemExit(1)
+            return 1
         logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
         logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
         logger.info("  Evaluator model:    %s", cfg.eval_model)
@@ -493,7 +498,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             cfg.effective_eval_base_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
             api_key=cfg.effective_eval_api_key, pg=pg,
         )
-        return
+        return 0
 
     try:
         embedder = Embedder(base_url=cfg.llm_base_url, model=cfg.embedding_model,
@@ -502,7 +507,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                             input_prefix=cfg.embedding_prefix)
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)
-        raise SystemExit(1) from exc
+        return 1
 
     sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
 
@@ -516,19 +521,21 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if cfg.run_once:
         run_once(cfg, slack, store, embedder, sparse_encoder, state, pg=pg)
-        return
+        return 0
 
+    signal.signal(signal.SIGTERM, _request_stop)
     interval = cfg.sync_interval_minutes * 60
-    while True:
+    while not stop_event.is_set():
         try:
             run_once(cfg, slack, store, embedder, sparse_encoder, state, pg=pg)
         except EmbeddingError as exc:
             logger.error("Sync cycle failed (embedding error): %s", exc)
         except Exception:
+            # One bad cycle (a Slack or Qdrant outage) mustn't stop the service.
             logger.exception("Sync cycle failed — will retry next interval")
+        if stop_event.is_set():
+            break
         logger.info("Sleeping %d minutes until next sync…", cfg.sync_interval_minutes)
-        time.sleep(interval)
-
-
-if __name__ == "__main__":
-    main()
+        stop_event.wait(interval)
+    logger.info("Stopped")
+    return 0

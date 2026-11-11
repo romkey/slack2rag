@@ -1,20 +1,23 @@
-"""Tests for the slack2rag entry point (src/main.py)."""
+"""Tests for the slack2rag entry point (slack2rag/main.py)."""
 
 from __future__ import annotations
 
 import json
 import logging
+import signal
+import threading
 from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from src import __version__, main
-from src.config import Config
-from src.embedder import EmbeddingError
-from src.processor import ChannelStats
-from src.state import SyncState
+from slack2rag import __version__, main
+from slack2rag.config import Config, ConfigError
+from slack2rag.embedder import EmbeddingError
+from slack2rag.pg_store import SchemaError
+from slack2rag.processor import ChannelStats
+from slack2rag.state import SyncState
 
 
 # ── shared fixtures ──────────────────────────────────────────────────────────
@@ -491,18 +494,30 @@ def test_unknown_arg_rejected() -> None:
     assert exc.value.code == 2
 
 
-class _StopLoop(Exception):
-    pass
+@pytest.fixture(autouse=True)
+def fresh_stop_event(monkeypatch):
+    """Give every test its own unset stop_event so a stop in one can't leak into another."""
+    event = threading.Event()
+    monkeypatch.setattr(main, "stop_event", event)
+    return event
+
+
+def test_request_stop_sets_stop_event(fresh_stop_event, caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="slack2rag"):
+        main._request_stop(signal.SIGTERM, None)
+    assert fresh_stop_event.is_set()
+    assert f"Received signal {int(signal.SIGTERM)}" in caplog.text
 
 
 @pytest.fixture
-def app(monkeypatch, tmp_path):
+def app(monkeypatch, tmp_path, fresh_stop_event):
     """Patch all external collaborators used by main.main()."""
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("STATE_FILE", str(tmp_path / "state.json"))
     for var in ("DATABASE_URL", "EVAL_TEST", "EVAL_PROMPT", "EVAL_MODEL", "RUN_ONCE",
                 "HYBRID_SEARCH", "SYNC_INTERVAL_MINUTES", "EMBEDDING_PREFIX",
-                "THREAD_UPDATE_LOOKBACK_HOURS", "EVAL_BASE_URL", "EVAL_API_KEY"):
+                "THREAD_UPDATE_LOOKBACK_HOURS", "EVAL_BASE_URL", "EVAL_API_KEY",
+                "LOG_LEVEL", "SLACK_CHANNEL_BLACKLIST", "SLACK_CHANNELS"):
         monkeypatch.delenv(var, raising=False)
 
     m = SimpleNamespace()
@@ -519,7 +534,11 @@ def app(monkeypatch, tmp_path):
     m.run_once = MagicMock()
     m.run_eval = MagicMock()
     m.check = MagicMock(return_value=True)
-    m.sleep = MagicMock()
+    m.signal = MagicMock()
+    m.stop_event = fresh_stop_event
+    # Never block: waiting returns at once (the loop tests decide when to stop).
+    m.wait = MagicMock(return_value=False)
+    monkeypatch.setattr(fresh_stop_event, "wait", m.wait)
 
     monkeypatch.setattr(main, "SlackClient", m.slack_cls)
     monkeypatch.setattr(main.PgStore, "from_url", m.pg_from_url)
@@ -530,7 +549,7 @@ def app(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "run_once", m.run_once)
     monkeypatch.setattr(main, "run_eval", m.run_eval)
     monkeypatch.setattr(main, "_check_llm", m.check)
-    monkeypatch.setattr(main.time, "sleep", m.sleep)
+    monkeypatch.setattr(main.signal, "signal", m.signal)
     m.env = monkeypatch
     return m
 
@@ -538,23 +557,29 @@ def app(monkeypatch, tmp_path):
 @pytest.mark.parametrize("ok,code", [(True, 0), (False, 1)])
 def test_main_check_flag_exit_codes(app, ok, code) -> None:
     app.check.return_value = ok
-    with pytest.raises(SystemExit) as exc:
-        main.main(["--check"])
-    assert exc.value.code == code
+    assert main.main(["--check"]) == code
     app.check.assert_called_once()
     app.slack_cls.assert_not_called()
 
 
 def test_main_missing_token(monkeypatch) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-    with pytest.raises(EnvironmentError):
+    with pytest.raises(ConfigError, match="SLACK_BOT_TOKEN"):
         main.main([])
+
+
+def test_main_uses_given_config_instead_of_env(app, tmp_path) -> None:
+    app.env.delenv("SLACK_BOT_TOKEN")
+    cfg = _cfg(tmp_path, slack_bot_token="xoxb-given", run_once=True)
+    assert main.main([], cfg=cfg) == 0
+    app.slack_cls.assert_called_once_with("xoxb-given", api_pause=0.0)
+    assert app.run_once.call_args.args[0] is cfg
 
 
 def test_main_run_once_mode(app) -> None:
     app.env.setenv("RUN_ONCE", "true")
     app.env.setenv("SLACK_API_PAUSE", "0.3")
-    main.main([])
+    assert main.main([]) == 0
 
     app.slack_cls.assert_called_once_with("xoxb-test", api_pause=0.3)
     app.slack.prefetch_users.assert_called_once()
@@ -569,7 +594,8 @@ def test_main_run_once_mode(app) -> None:
     assert args[1] is app.slack and args[2] is app.store and args[3] is app.embedder
     assert args[4] is None
     assert kwargs["pg"] is None
-    app.sleep.assert_not_called()
+    app.wait.assert_not_called()
+    app.signal.assert_not_called()
 
 
 def test_main_with_postgres_and_hybrid(app) -> None:
@@ -579,10 +605,10 @@ def test_main_with_postgres_and_hybrid(app) -> None:
     app.pg_from_url.return_value = app.pg
     app.slack.user_records.return_value = [{"id": "U1"}]
 
-    main.main([])
+    assert main.main([]) == 0
 
     app.pg_from_url.assert_called_once_with("postgresql://db/x")
-    app.pg.init_schema.assert_called_once()
+    app.pg.check_schema.assert_called_once()
     app.pg.bulk_upsert_users.assert_called_once_with([{"id": "U1"}])
     app.sparse_cls.assert_called_once()
     assert app.store_cls.call_args.kwargs["hybrid"] is True
@@ -590,31 +616,69 @@ def test_main_with_postgres_and_hybrid(app) -> None:
     assert app.run_once.call_args.kwargs["pg"] is app.pg
 
 
-def test_main_embedder_failure_exits(app, caplog) -> None:
-    app.embedder_cls.side_effect = EmbeddingError("no model")
+def test_main_postgres_schema_out_of_date_returns_one(app, caplog) -> None:
+    app.env.setenv("DATABASE_URL", "postgresql://db/x")
+    app.pg_from_url.return_value = app.pg
+    app.pg.check_schema.side_effect = SchemaError("run `slack2rag migrate` first")
+
     with caplog.at_level(logging.ERROR, logger="slack2rag"):
-        with pytest.raises(SystemExit) as exc:
-            main.main([])
-    assert exc.value.code == 1
-    assert isinstance(exc.value.__cause__, EmbeddingError)
-    assert "Embedding setup failed" in caplog.text
+        assert main.main([]) == 1
+
+    assert "run `slack2rag migrate` first" in caplog.text
+    app.pg.bulk_upsert_users.assert_not_called()
+    app.embedder_cls.assert_not_called()
     app.run_once.assert_not_called()
 
 
-def test_main_loop_survives_errors_and_sleeps(app, caplog) -> None:
+def test_main_embedder_failure_returns_one(app, caplog) -> None:
+    app.embedder_cls.side_effect = EmbeddingError("no model")
+    with caplog.at_level(logging.ERROR, logger="slack2rag"):
+        assert main.main([]) == 1
+    assert "Embedding setup failed" in caplog.text
+    assert "no model" in caplog.text
+    app.run_once.assert_not_called()
+
+
+def test_main_loop_survives_errors_and_waits(app, caplog) -> None:
     app.env.setenv("SYNC_INTERVAL_MINUTES", "2")
     app.run_once.side_effect = [EmbeddingError("embed down"), RuntimeError("qdrant down"), None]
-    app.sleep.side_effect = [None, None, _StopLoop()]
+    waits = iter([None, None, app.stop_event.set])
+
+    def fake_wait(timeout):
+        action = next(waits)
+        if action:
+            action()
+        return app.stop_event.is_set()
+
+    app.wait.side_effect = fake_wait
 
     with caplog.at_level(logging.INFO, logger="slack2rag"):
-        with pytest.raises(_StopLoop):
-            main.main([])
+        assert main.main([]) == 0
 
+    app.signal.assert_called_once_with(signal.SIGTERM, main._request_stop)
     assert app.run_once.call_count == 3
-    assert [c.args[0] for c in app.sleep.call_args_list] == [120, 120, 120]
+    assert [c.args[0] for c in app.wait.call_args_list] == [120, 120, 120]
     assert "Sync cycle failed (embedding error): embed down" in caplog.text
     assert "Sync cycle failed — will retry next interval" in caplog.text
     assert "Sleeping 2 minutes until next sync" in caplog.text
+    assert "Stopped" in caplog.text
+
+
+def test_main_loop_stops_without_waiting_when_stopped_mid_cycle(app, caplog) -> None:
+    app.run_once.side_effect = lambda *a, **k: app.stop_event.set()
+    with caplog.at_level(logging.INFO, logger="slack2rag"):
+        assert main.main([]) == 0
+    app.run_once.assert_called_once()
+    app.wait.assert_not_called()
+    assert "Sleeping" not in caplog.text
+    assert "Stopped" in caplog.text
+
+
+def test_main_loop_does_not_run_when_already_stopped(app) -> None:
+    app.stop_event.set()
+    assert main.main([]) == 0
+    app.run_once.assert_not_called()
+    app.signal.assert_called_once()
 
 
 def test_main_eval_mode(app) -> None:
@@ -628,7 +692,7 @@ def test_main_eval_mode(app) -> None:
         {"id": "C1", "name": "eng"}, {"id": "C2", "name": "random"},
     ]
 
-    main.main([])
+    assert main.main([]) == 0
 
     app.run_eval.assert_called_once()
     args, kwargs = app.run_eval.call_args
@@ -648,7 +712,5 @@ def test_main_eval_mode_requires_prompt_and_model(app, prompt, model) -> None:
     app.env.setenv("EVAL_TEST", "1")
     app.env.setenv("EVAL_PROMPT", prompt)
     app.env.setenv("EVAL_MODEL", model)
-    with pytest.raises(SystemExit) as exc:
-        main.main([])
-    assert exc.value.code == 1
+    assert main.main([]) == 1
     app.run_eval.assert_not_called()

@@ -11,8 +11,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src import evaluator
-from src.evaluator import _chat_completion, _format_line, run_eval, score_message
+from slack2rag import evaluator
+from slack2rag.evaluator import _chat_completion, _format_line, run_eval, score_message
 
 
 class _JsonResponse:
@@ -89,7 +89,7 @@ def test_chat_completion_http_error_returns_none_and_logs_body(monkeypatch, capl
         raise _http_error(500, b"model exploded")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    with caplog.at_level(logging.ERROR, logger="src.evaluator"):
+    with caplog.at_level(logging.ERROR, logger="slack2rag.evaluator"):
         assert _chat_completion("http://llm/v1", "", "m", "hi") is None
     assert "HTTP 500" in caplog.text
     assert "model exploded" in caplog.text
@@ -103,7 +103,7 @@ def test_chat_completion_http_error_unreadable_body(monkeypatch, caplog) -> None
         raise exc
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    with caplog.at_level(logging.ERROR, logger="src.evaluator"):
+    with caplog.at_level(logging.ERROR, logger="slack2rag.evaluator"):
         assert _chat_completion("http://llm/v1", "", "m", "hi") is None
     assert "HTTP 502" in caplog.text
 
@@ -113,7 +113,7 @@ def test_chat_completion_url_error_returns_none(monkeypatch, caplog) -> None:
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    with caplog.at_level(logging.ERROR, logger="src.evaluator"):
+    with caplog.at_level(logging.ERROR, logger="slack2rag.evaluator"):
         assert _chat_completion("http://llm/v1", "", "m", "hi") is None
     assert "connection refused" in caplog.text
 
@@ -130,7 +130,7 @@ def test_chat_completion_url_error_returns_none(monkeypatch, caplog) -> None:
 )
 def test_chat_completion_unexpected_shape_returns_none(monkeypatch, caplog, body) -> None:
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: _JsonResponse(body))
-    with caplog.at_level(logging.ERROR, logger="src.evaluator"):
+    with caplog.at_level(logging.ERROR, logger="slack2rag.evaluator"):
         assert _chat_completion("http://llm/v1", "", "m", "hi") is None
     assert "Unexpected chat-completions response shape" in caplog.text
 
@@ -294,7 +294,7 @@ def test_run_eval_progress_logging(monkeypatch, tmp_path, caplog) -> None:
     monkeypatch.setattr(evaluator, "score_message", lambda *a, **k: (8, ""))
     msgs = [{"ts": f"{i}.0", "user": "U", "text": f"m{i}"} for i in range(100)]
     slack = _fake_slack({"C": msgs})
-    with caplog.at_level(logging.INFO, logger="src.evaluator"):
+    with caplog.at_level(logging.INFO, logger="slack2rag.evaluator"):
         run_eval("u", "m", "p", [{"id": "C"}], slack)
     assert "Eval progress: 100 scored (100 good, 0 bad, 0 errors)" in caplog.text
     assert "Eval complete: 100 messages scored" in caplog.text

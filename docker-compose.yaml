@@ -1,0 +1,86 @@
+# Development: runs the indexer from your working tree, with the dev
+# dependencies installed, plus Qdrant, Ollama and PostgreSQL.
+#
+#   cp .env.example .env              # then set SLACK_BOT_TOKEN
+#   docker compose up --build
+#   docker compose exec ollama ollama pull nomic-embed-text   # once
+#   docker compose run --rm app slack2rag query "deploy process"
+#   docker compose run --rm app bash  # a shell with everything installed
+#
+# Restart the app (docker compose restart app) to pick up code changes.
+# Tests, lint and production have their own compose files:
+#
+#   docker compose -f docker-compose.test.yaml run --rm test
+#   docker compose -f docker-compose.lint.yaml run --rm lint
+#   docker compose -f docker-compose.prod.yaml up -d
+
+services:
+  app:
+    build:
+      context: .
+      target: dev
+    # uv run re-syncs /venv if pyproject.toml or uv.lock changed. The schema
+    # migration is idempotent, so running it on every start is safe.
+    command: ["uv", "run", "--locked", "sh", "-c", "slack2rag migrate && slack2rag"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      LLM_BASE_URL: http://ollama:11434/v1
+      DATABASE_URL: postgresql://slack2rag:slack2rag@db:5432/slack2rag  # not-a-secret
+      STATE_FILE: /data/state.json
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - uv-cache:/root/.cache/uv
+      - dev-state:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - dev-qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:0.40.16
+    ports:
+      - "11434:11434"
+    volumes:
+      - dev-ollama:/root/.ollama
+
+  db:
+    image: postgres:18-trixie
+    environment:
+      POSTGRES_USER: slack2rag
+      POSTGRES_PASSWORD: slack2rag  # not-a-secret: local dev only
+      POSTGRES_DB: slack2rag
+    ports:
+      - "5433:5432"
+    volumes:
+      - dev-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slack2rag -d slack2rag"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  uv-cache:
+  dev-state:
+  dev-qdrant:
+  dev-ollama:
+  dev-db:

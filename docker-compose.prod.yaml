@@ -1,0 +1,113 @@
+# Production: runs the released image from ghcr.io with Qdrant and Ollama.
+# Configure it in .env next to this file (see .env.example and
+# docs/configuration.md).
+#
+#   docker compose -f docker-compose.prod.yaml up -d
+#   docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text
+#   APP_VERSION=1.2.3 docker compose -f docker-compose.prod.yaml up -d   # pin a release
+#   docker compose -f docker-compose.prod.yaml build   # build the image locally instead
+#
+# Search the index:
+#   docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy process"
+#
+# Optional PostgreSQL copy of the raw Slack data: set POSTGRES_* and
+# DATABASE_URL (host db) in .env, then add --profile postgres to every
+# command (or set COMPOSE_PROFILES=postgres in .env).
+#
+# The indexer doesn't listen on a port, so there is no HTTP health check;
+# restart: unless-stopped brings it back if it exits.
+
+services:
+  app:
+    image: ghcr.io/romkey/slack2rag:${APP_VERSION:-latest}
+    build:
+      context: .
+      target: production
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      STATE_FILE: /data/state.json
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+        required: false
+    volumes:
+      - slack2rag_state:/data
+    # Least privilege: nothing to write but /tmp and /data, no capabilities.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API, for other apps to query the index
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Embeddings (and optionally the evaluator's chat model) via Ollama's
+  # OpenAI-compatible /v1 API. To use OpenAI or another provider instead,
+  # remove this service and set LLM_BASE_URL / LLM_API_KEY in .env.
+  ollama:
+    image: ollama/ollama:0.40.16
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
+  migrate:
+    image: ghcr.io/romkey/slack2rag:${APP_VERSION:-latest}
+    profiles: [postgres]
+    command: ["slack2rag", "migrate"]
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  db:
+    image: postgres:18-trixie
+    profiles: [postgres]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - postgres18_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# The same volume names as the old docker-compose.yml, so an existing
+# index and sync state carry over. PostgreSQL 18 needs a new volume; see
+# CHANGELOG.md for moving data from the old postgres_data (PostgreSQL 16).
+volumes:
+  slack2rag_state:
+  qdrant_data:
+  ollama_data:
+  postgres18_data:

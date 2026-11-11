@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.config import Config
+from slack2rag.config import Config
 
 
 def test_database_url_from_env(monkeypatch) -> None:

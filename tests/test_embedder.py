@@ -7,7 +7,7 @@ import urllib.request
 
 import pytest
 
-from src.embedder import Embedder, EmbeddingError
+from slack2rag.embedder import Embedder, EmbeddingError
 
 
 class _JsonResponse:

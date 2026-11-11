@@ -8,8 +8,8 @@ from collections import Counter
 
 import pytest
 
-from src import processor
-from src.processor import (
+from slack2rag import processor
+from slack2rag.processor import (
     MAX_CHARS,
     OVERLAP,
     REPLY_PREVIEW_CHARS,
