@@ -5,9 +5,8 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock
 
-import pytest
-
 import psycopg
+import pytest
 
 from slack2rag.pg_store import PgStore, SchemaError, head_revision, migrate
 
@@ -69,13 +68,17 @@ def test_downgrade_to_base_drops_tables(pg: PgStore, pg_url: str) -> None:
     command.downgrade(_alembic_config(pg_url), "base")
     assert pg.schema_revision() is None
     with psycopg.connect(pg_url) as conn:
-        assert conn.execute("SELECT to_regclass('slack_channels')").fetchone()[0] is None
+        assert (
+            conn.execute("SELECT to_regclass('slack_channels')").fetchone()[0] is None
+        )
 
 
 def test_migrate_adopts_tables_created_before_migrations(empty_db: str) -> None:
     """Databases from before Alembic already have the tables; migrate must not fail on them."""
     with psycopg.connect(empty_db) as conn:
-        conn.execute("CREATE TABLE slack_channels (id TEXT PRIMARY KEY, payload JSONB NOT NULL)")
+        conn.execute(
+            "CREATE TABLE slack_channels (id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
+        )
         conn.commit()
     migrate(empty_db)
     PgStore(empty_db).check_schema()
@@ -92,13 +95,15 @@ def test_upsert_channel_user_message_roundtrip(pg: PgStore) -> None:
 
     with psycopg.connect(pg._conninfo) as conn:
         ch = conn.execute(
-            "SELECT payload FROM slack_channels WHERE id = %s", ("C_TEST",),
+            "SELECT payload FROM slack_channels WHERE id = %s",
+            ("C_TEST",),
         ).fetchone()
         assert ch is not None
         assert ch[0]["name"] == "test-channel"
 
         u = conn.execute(
-            "SELECT payload FROM slack_users WHERE id = %s", ("U_TEST",),
+            "SELECT payload FROM slack_users WHERE id = %s",
+            ("U_TEST",),
         ).fetchone()
         assert u is not None
         assert u[0]["name"] == "alice"
@@ -145,5 +150,7 @@ def test_bulk_upsert_users(pg: PgStore) -> None:
     pg.bulk_upsert_users(users)
 
     with psycopg.connect(pg._conninfo) as conn:
-        n = conn.execute("SELECT count(*) FROM slack_users WHERE id IN ('U_A','U_B')").fetchone()[0]
+        n = conn.execute(
+            "SELECT count(*) FROM slack_users WHERE id IN ('U_A','U_B')"
+        ).fetchone()[0]
         assert n == 2

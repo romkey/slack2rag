@@ -146,7 +146,9 @@ def test_check_schema_passes_at_head(monkeypatch) -> None:
 def test_check_schema_raises_when_not_at_head(monkeypatch, revision, shown) -> None:
     store = PgStore("dsn")
     monkeypatch.setattr(store, "schema_revision", lambda: revision)
-    with pytest.raises(SchemaError, match=f"at revision {shown}, not 0001; run `slack2rag migrate`"):
+    with pytest.raises(
+        SchemaError, match=f"at revision {shown}, not 0001; run `slack2rag migrate`"
+    ):
         store.check_schema()
 
 
@@ -238,12 +240,18 @@ def test_bulk_upsert_users_noop(conn, users) -> None:
 def test_persist_channel_messages_and_users(monkeypatch) -> None:
     store = PgStore("dsn")
     calls: list = []
-    monkeypatch.setattr(store, "upsert_channel", lambda ch: calls.append(("channel", ch["id"])))
-    monkeypatch.setattr(store, "upsert_message", lambda cid, m: calls.append(("msg", cid, m["ts"])))
+    monkeypatch.setattr(
+        store, "upsert_channel", lambda ch: calls.append(("channel", ch["id"]))
+    )
+    monkeypatch.setattr(
+        store, "upsert_message", lambda cid, m: calls.append(("msg", cid, m["ts"]))
+    )
     monkeypatch.setattr(store, "upsert_user", lambda u: calls.append(("user", u["id"])))
 
     slack = MagicMock()
-    slack.get_user_record.side_effect = lambda uid: None if uid == "U_GONE" else {"id": uid}
+    slack.get_user_record.side_effect = lambda uid: (
+        None if uid == "U_GONE" else {"id": uid}
+    )
 
     root = {"ts": "1.0", "user": "U1"}
     replies = [
@@ -256,17 +264,23 @@ def test_persist_channel_messages_and_users(monkeypatch) -> None:
     store.persist_channel_messages_and_users(slack, {"id": "C1"}, root, replies)
 
     assert calls[0] == ("channel", "C1")
-    assert calls[1:7] == [("msg", "C1", t) for t in ("1.0", "1.1", "1.2", "1.3", "1.4", "1.5")]
+    assert calls[1:7] == [
+        ("msg", "C1", t) for t in ("1.0", "1.1", "1.2", "1.3", "1.4", "1.5")
+    ]
     users = sorted(c[1] for c in calls if c[0] == "user")
     assert users == ["U1", "U2"]
     assert sorted(c.args[0] for c in slack.get_user_record.call_args_list) == [
-        "U1", "U2", "U_GONE",
+        "U1",
+        "U2",
+        "U_GONE",
     ]
 
 
 def test_persist_without_channel_id_is_noop(conn) -> None:
     slack = MagicMock()
-    PgStore("dsn").persist_channel_messages_and_users(slack, {"name": "x"}, {"ts": "1"}, [])
+    PgStore("dsn").persist_channel_messages_and_users(
+        slack, {"name": "x"}, {"ts": "1"}, []
+    )
     conn.connect.assert_not_called()
     slack.get_user_record.assert_not_called()
 
@@ -275,7 +289,10 @@ def test_persist_end_to_end_with_mocked_psycopg(conn) -> None:
     slack = MagicMock()
     slack.get_user_record.return_value = {"id": "U1"}
     PgStore("dsn").persist_channel_messages_and_users(
-        slack, {"id": "C1"}, {"ts": "1.0", "user": "U1"}, [],
+        slack,
+        {"id": "C1"},
+        {"ts": "1.0", "user": "U1"},
+        [],
     )
     tables = [sql.split("INSERT INTO ")[1].split()[0] for sql, _ in _executed(conn)]
     assert tables == ["slack_channels", "slack_messages", "slack_users"]

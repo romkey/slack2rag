@@ -29,7 +29,7 @@ class _JsonResponse:
     def __init__(self, body: object) -> None:
         self._body = body
 
-    def __enter__(self) -> "_JsonResponse":
+    def __enter__(self) -> _JsonResponse:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -43,8 +43,12 @@ def _ok(n: int, vec: list[float] | None = None) -> dict:
     return {"data": [{"index": i, "embedding": vec or [1.0, 2.0]} for i in range(n)]}
 
 
-def _http_error(code: int, body: bytes = b"", reason: str = "Bad") -> urllib.error.HTTPError:
-    return urllib.error.HTTPError("http://llm/v1/embeddings", code, reason, {}, io.BytesIO(body))
+def _http_error(
+    code: int, body: bytes = b"", reason: str = "Bad"
+) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "http://llm/v1/embeddings", code, reason, {}, io.BytesIO(body)
+    )
 
 
 def _make_embedder(monkeypatch, handler, **kwargs) -> Embedder:
@@ -160,7 +164,9 @@ def test_constructor_propagates_embedding_error(monkeypatch) -> None:
         raise urllib.error.URLError("refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    with pytest.raises(EmbeddingError, match="Could not reach LLM at http://x/v1: refused"):
+    with pytest.raises(
+        EmbeddingError, match="Could not reach LLM at http://x/v1: refused"
+    ):
         Embedder(base_url="http://x/v1", model="m")
 
 
@@ -286,7 +292,10 @@ def test_context_error_gives_up_below_min_len(monkeypatch) -> None:
         ([1, 2], "Unexpected response shape"),
         ({"embeddings": []}, "Unexpected response shape"),
         ({"data": "nope"}, "Unexpected response shape"),
-        ({"data": [{"index": 0, "embedding": [1.0]}] * 2}, r"returned 2 embedding\(s\) for 1"),
+        (
+            {"data": [{"index": 0, "embedding": [1.0]}] * 2},
+            r"returned 2 embedding\(s\) for 1",
+        ),
     ],
 )
 def test_bad_response_shapes(monkeypatch, body, match) -> None:
@@ -302,10 +311,12 @@ def test_non_dict_item_is_malformed(monkeypatch) -> None:
 
 
 def test_bad_index_falls_back_to_slot(monkeypatch) -> None:
-    body = {"data": [
-        {"index": 99, "embedding": [1.0]},
-        {"index": "zero", "embedding": [2.0]},
-    ]}
+    body = {
+        "data": [
+            {"index": 99, "embedding": [1.0]},
+            {"index": "zero", "embedding": [2.0]},
+        ]
+    }
     e = _make_embedder(monkeypatch, lambda p: _JsonResponse(body))
     assert e.embed(["a", "b"]) == [[1.0], [2.0]]
 
@@ -323,10 +334,14 @@ def test_duplicate_index_leaves_hole_and_falls_back(monkeypatch) -> None:
         n = len(payload["input"])
         calls.append(n)
         if n == 2:
-            return _JsonResponse({"data": [
-                {"index": 0, "embedding": [1.0]},
-                {"index": 0, "embedding": [2.0]},
-            ]})
+            return _JsonResponse(
+                {
+                    "data": [
+                        {"index": 0, "embedding": [1.0]},
+                        {"index": 0, "embedding": [2.0]},
+                    ]
+                }
+            )
         return _JsonResponse(_ok(1, [5.0]))
 
     e = _make_embedder(monkeypatch, handler)
@@ -340,7 +355,7 @@ def test_duplicate_index_leaves_hole_and_falls_back(monkeypatch) -> None:
 @pytest.mark.xfail(
     strict=True,
     reason="src bug: _is_context_length_error consumes the HTTPError body, so the "
-           "subsequent EmbeddingError for a non-context 400/413/422 has no 'Response:'",
+    "subsequent EmbeddingError for a non-context 400/413/422 has no 'Response:'",
 )
 def test_non_context_400_keeps_response_body(monkeypatch) -> None:
     def handler(payload):

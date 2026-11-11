@@ -14,7 +14,7 @@ class _JsonResponse:
     def __init__(self, body: dict) -> None:
         self._body = body
 
-    def __enter__(self) -> "_JsonResponse":
+    def __enter__(self) -> _JsonResponse:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -98,15 +98,17 @@ def test_embedder_orders_by_index(monkeypatch) -> None:
         if n == 1:
             return _JsonResponse(_embedding_list([[0.0]]))
         # Return in reverse order with explicit indexes
-        return _JsonResponse({
-            "object": "list",
-            "data": [
-                {"index": 2, "embedding": [0.3]},
-                {"index": 0, "embedding": [0.1]},
-                {"index": 1, "embedding": [0.2]},
-            ],
-            "model": "m",
-        })
+        return _JsonResponse(
+            {
+                "object": "list",
+                "data": [
+                    {"index": 2, "embedding": [0.3]},
+                    {"index": 0, "embedding": [0.1]},
+                    {"index": 1, "embedding": [0.2]},
+                ],
+                "model": "m",
+            }
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -127,11 +129,13 @@ def test_embedder_falls_back_to_single_input_on_null_batch(monkeypatch) -> None:
             # single-input requests work fine
             return _JsonResponse(_embedding_list([[float(len(calls))]]))
         # array input: server returns nulls (the bug we're working around)
-        return _JsonResponse({
-            "object": "list",
-            "data": [{"index": i, "embedding": None} for i in range(n)],
-            "model": "m",
-        })
+        return _JsonResponse(
+            {
+                "object": "list",
+                "data": [{"index": i, "embedding": None} for i in range(n)],
+                "model": "m",
+            }
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -162,11 +166,13 @@ def test_embedder_raises_when_single_input_returns_null(monkeypatch) -> None:
         if counter["n"] == 1:
             # probe succeeds so we get past __init__
             return _JsonResponse(_embedding_list([[1.0]]))
-        return _JsonResponse({
-            "object": "list",
-            "data": [{"index": 0, "embedding": None}],
-            "model": "m",
-        })
+        return _JsonResponse(
+            {
+                "object": "list",
+                "data": [{"index": 0, "embedding": None}],
+                "model": "m",
+            }
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     embedder = Embedder(base_url="http://x/v1", model="m")

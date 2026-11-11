@@ -23,21 +23,20 @@ import threading
 import time
 from collections import Counter
 from types import FrameType
-from typing import List, Optional
 
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
 from .evaluator import _chat_completion, run_eval
+from .pg_store import PgStore, SchemaError
 from .processor import (
     ChannelStats,
     Document,
-    build_documents,
     build_channel_summary,
-    build_workspace_summary,
-    build_user_summary,
+    build_documents,
     build_team_summary,
+    build_user_summary,
+    build_workspace_summary,
 )
-from .pg_store import PgStore, SchemaError
 from .slack_client import SlackClient
 from .state import SyncState
 from .vector_store import VectorStore
@@ -50,11 +49,11 @@ stop_event = threading.Event()
 
 def _build_docs_for_message(
     msg: dict,
-    replies: List[dict],
+    replies: list[dict],
     channel: dict,
     slack: SlackClient,
     cfg: Config,
-) -> List[Document]:
+) -> list[Document]:
     """Build Documents from a single message, enriched with full metadata."""
     ts = msg["ts"]
 
@@ -92,10 +91,10 @@ def sync_channel(
     slack: SlackClient,
     store: VectorStore,
     embedder: Embedder,
-    sparse_encoder: Optional[SparseEncoder],
+    sparse_encoder: SparseEncoder | None,
     state: SyncState,
     cfg: Config,
-    pg: Optional[PgStore] = None,
+    pg: PgStore | None = None,
 ) -> tuple[int, ChannelStats]:
     """Sync one channel.  Returns (documents_indexed, channel_stats)."""
     channel_id = channel["id"]
@@ -104,7 +103,7 @@ def sync_channel(
 
     logger.info("Syncing #%s  (oldest_ts=%s)", channel_name, oldest_ts or "beginning")
 
-    pending_docs: List[Document] = []
+    pending_docs: list[Document] = []
     latest_ts: str | None = oldest_ts
     total_indexed = 0
     stats = ChannelStats()
@@ -115,7 +114,7 @@ def sync_channel(
         if latest_ts is None or float(ts) > float(latest_ts):
             latest_ts = ts
 
-        replies: List[dict] = []
+        replies: list[dict] = []
         if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == ts:
             replies = slack.get_thread_replies(channel_id, ts)
 
@@ -127,7 +126,7 @@ def sync_channel(
             stats.user_counts[uid] += 1
         try:
             stats.timestamps.append(float(ts))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
         for reply in replies:
             reply_text = reply.get("text", "")
@@ -151,7 +150,12 @@ def sync_channel(
 
     if latest_ts and latest_ts != oldest_ts:
         state.set_cursor(channel_id, latest_ts)
-        logger.info("#%s  indexed %d documents (cursor→%s)", channel_name, total_indexed, latest_ts)
+        logger.info(
+            "#%s  indexed %d documents (cursor→%s)",
+            channel_name,
+            total_indexed,
+            latest_ts,
+        )
     else:
         logger.info("#%s  no new messages", channel_name)
 
@@ -163,10 +167,10 @@ def refresh_threads(
     slack: SlackClient,
     store: VectorStore,
     embedder: Embedder,
-    sparse_encoder: Optional[SparseEncoder],
+    sparse_encoder: SparseEncoder | None,
     cfg: Config,
     lookback_hours: int,
-    pg: Optional[PgStore] = None,
+    pg: PgStore | None = None,
 ) -> int:
     """Re-index threads in *channel* that received new replies recently.
 
@@ -185,7 +189,7 @@ def refresh_threads(
         lookback_hours,
     )
 
-    pending_docs: List[Document] = []
+    pending_docs: list[Document] = []
     refreshed = 0
 
     for msg in slack.get_channel_messages(channel_id, oldest_ts=lookback_ts):
@@ -214,10 +218,10 @@ def refresh_threads(
 
 
 def _flush(
-    docs: List[Document],
+    docs: list[Document],
     store: VectorStore,
     embedder: Embedder,
-    sparse_encoder: Optional[SparseEncoder],
+    sparse_encoder: SparseEncoder | None,
 ) -> int:
     texts = [d.text for d in docs]
     vectors = embedder.embed(texts)
@@ -234,7 +238,7 @@ def _load_channel_stats(stats_file: str) -> dict[str, ChannelStats]:
         with open(stats_file) as f:
             raw = json.load(f)
         return {k: ChannelStats.from_dict(v) for k, v in raw.items()}
-    except (json.JSONDecodeError, OSError, KeyError):
+    except json.JSONDecodeError, OSError, KeyError:
         return {}
 
 
@@ -250,19 +254,19 @@ def _save_channel_stats(stats_file: str, all_stats: dict[str, ChannelStats]) -> 
 
 
 def _index_summaries(
-    channels: List[dict],
+    channels: list[dict],
     channel_stats: dict[str, ChannelStats],
     user_profiles: dict[str, dict],
     get_user_name,
     store: VectorStore,
     embedder: Embedder,
-    sparse_encoder: Optional[SparseEncoder],
+    sparse_encoder: SparseEncoder | None,
 ) -> None:
     """Generate and index workspace, channel, user, and team summary documents."""
     logger.info("Generating channel, workspace, and user summaries…")
 
     channel_counts: dict[str, int] = {}
-    summary_docs: List[Document] = []
+    summary_docs: list[Document] = []
 
     for ch in channels:
         cid = ch["id"]
@@ -270,7 +274,8 @@ def _index_summaries(
         channel_counts[cid] = count
         summary_docs.append(
             build_channel_summary(
-                ch, count,
+                ch,
+                count,
                 stats=channel_stats.get(cid),
                 get_user_name=get_user_name,
             )
@@ -300,19 +305,24 @@ def _index_summaries(
     logger.info("Indexed %d summary documents", len(summary_docs))
 
 
-def _get_channels(cfg: Config, slack: SlackClient) -> List[dict]:
+def _get_channels(cfg: Config, slack: SlackClient) -> list[dict]:
     """Fetch channels, applying both the include list and the blacklist."""
     channels = slack.get_public_channels(cfg.channel_list or None)
     blacklist = cfg.channel_blacklist
     if blacklist and channels:
         before = len(channels)
         channels = [
-            ch for ch in channels
+            ch
+            for ch in channels
             if ch.get("name", "") not in blacklist and ch["id"] not in blacklist
         ]
         skipped = before - len(channels)
         if skipped:
-            logger.info("Blacklist: skipping %d channel(s): %s", skipped, ", ".join(sorted(blacklist)))
+            logger.info(
+                "Blacklist: skipping %d channel(s): %s",
+                skipped,
+                ", ".join(sorted(blacklist)),
+            )
     return channels
 
 
@@ -321,9 +331,9 @@ def run_once(
     slack: SlackClient,
     store: VectorStore,
     embedder: Embedder,
-    sparse_encoder: Optional[SparseEncoder],
+    sparse_encoder: SparseEncoder | None,
     state: SyncState,
-    pg: Optional[PgStore] = None,
+    pg: PgStore | None = None,
 ) -> None:
     channels = _get_channels(cfg, slack)
     if not channels:
@@ -336,7 +346,14 @@ def run_once(
     total = 0
     for ch in channels:
         count, new_stats = sync_channel(
-            ch, slack, store, embedder, sparse_encoder, state, cfg, pg=pg,
+            ch,
+            slack,
+            store,
+            embedder,
+            sparse_encoder,
+            state,
+            cfg,
+            pg=pg,
         )
         total += count
         cid = ch["id"]
@@ -348,19 +365,36 @@ def run_once(
     _save_channel_stats(stats_file, all_stats)
 
     if cfg.thread_update_lookback_hours > 0:
-        logger.info("Starting thread-update refresh pass (%dh lookback)…",
-                     cfg.thread_update_lookback_hours)
+        logger.info(
+            "Starting thread-update refresh pass (%dh lookback)…",
+            cfg.thread_update_lookback_hours,
+        )
         for ch in channels:
             refresh_threads(
-                ch, slack, store, embedder, sparse_encoder, cfg,
-                cfg.thread_update_lookback_hours, pg=pg,
+                ch,
+                slack,
+                store,
+                embedder,
+                sparse_encoder,
+                cfg,
+                cfg.thread_update_lookback_hours,
+                pg=pg,
             )
 
     _index_summaries(
-        channels, all_stats, slack.get_user_profiles(),
-        slack.get_user_name, store, embedder, sparse_encoder,
+        channels,
+        all_stats,
+        slack.get_user_profiles(),
+        slack.get_user_name,
+        store,
+        embedder,
+        sparse_encoder,
     )
-    logger.info("Sync complete — %d documents indexed  (total in store: %d)", total, store.count())
+    logger.info(
+        "Sync complete — %d documents indexed  (total in store: %d)",
+        total,
+        store.count(),
+    )
 
 
 def _check_llm(cfg: Config) -> bool:
@@ -386,7 +420,8 @@ def _check_llm(cfg: Config) -> bool:
         vector = embedder.embed(["slack2rag connectivity check"])[0]
         logger.info(
             "  ✓ Embedding model OK (dimension=%d, sample[0]=%.4f)",
-            len(vector), vector[0] if vector else 0.0,
+            len(vector),
+            vector[0] if vector else 0.0,
         )
     except Exception as exc:
         logger.error("  ✗ Embedding model FAILED: %s", exc)
@@ -396,7 +431,7 @@ def _check_llm(cfg: Config) -> bool:
         logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
         logger.info("  Evaluator model:    %s", cfg.eval_model)
         probe_prompt = (
-            "Reply with JSON only: {\"ok\": true}.  This is a connectivity check."
+            'Reply with JSON only: {"ok": true}.  This is a connectivity check.'
         )
         content = _chat_completion(
             cfg.effective_eval_base_url,
@@ -417,18 +452,21 @@ def _check_llm(cfg: Config) -> bool:
     return all_ok
 
 
-def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from . import __version__
+
     parser = argparse.ArgumentParser(
         prog="slack2rag",
         description="Index Slack messages into Qdrant for RAG.",
     )
-    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "-V", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument(
         "--check",
         action="store_true",
         help="Verify connectivity to the embedding and evaluator LLMs, then exit. "
-             "Exit 0 on success, 1 on any failure.",
+        "Exit 0 on success, 1 on any failure.",
     )
     return parser.parse_args(argv)
 
@@ -438,13 +476,14 @@ def _request_stop(signum: int, frame: FrameType | None) -> None:
     stop_event.set()
 
 
-def main(argv: Optional[List[str]] = None, cfg: Config | None = None) -> int:
+def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
     """Run the indexer; returns the process exit code."""
     args = _parse_args(argv)
     if cfg is None:
         cfg = Config.from_env()
 
     from . import __version__
+
     logger.info("Starting slack2rag v%s", __version__)
 
     if args.check:
@@ -457,13 +496,19 @@ def main(argv: Optional[List[str]] = None, cfg: Config | None = None) -> int:
     logger.info("  Qdrant:         %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
     logger.info("  LLM:            %s", cfg.llm_base_url)
     logger.info("  Embedding model: %s", cfg.embedding_model)
-    logger.info("  Embed prefix:   %s", repr(cfg.embedding_prefix) if cfg.embedding_prefix else "none")
+    logger.info(
+        "  Embed prefix:   %s",
+        repr(cfg.embedding_prefix) if cfg.embedding_prefix else "none",
+    )
     logger.info("  Hybrid search:  %s", cfg.hybrid_search)
     logger.info("  Channels:       %s", cfg.channel_list or "all public")
     logger.info("  Min msg length: %d chars", cfg.min_message_length)
-    logger.info("  Thread refresh: %s",
-                f"{cfg.thread_update_lookback_hours}h lookback"
-                if cfg.thread_update_lookback_hours else "disabled")
+    logger.info(
+        "  Thread refresh: %s",
+        f"{cfg.thread_update_lookback_hours}h lookback"
+        if cfg.thread_update_lookback_hours
+        else "disabled",
+    )
     logger.info("  Run once:       %s", cfg.run_once)
     logger.info(
         "  PostgreSQL:     %s",
@@ -485,26 +530,38 @@ def main(argv: Optional[List[str]] = None, cfg: Config | None = None) -> int:
 
     if cfg.eval_test:
         if not cfg.eval_prompt:
-            logger.error("EVAL_TEST is set but EVAL_PROMPT is empty — nothing to evaluate against")
+            logger.error(
+                "EVAL_TEST is set but EVAL_PROMPT is empty — nothing to evaluate against"
+            )
             return 1
         if not cfg.eval_model:
-            logger.error("EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified")
+            logger.error(
+                "EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified"
+            )
             return 1
         logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
         logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
         logger.info("  Evaluator model:    %s", cfg.eval_model)
         channels = _get_channels(cfg, slack)
         run_eval(
-            cfg.effective_eval_base_url, cfg.eval_model, cfg.eval_prompt, channels, slack,
-            api_key=cfg.effective_eval_api_key, pg=pg,
+            cfg.effective_eval_base_url,
+            cfg.eval_model,
+            cfg.eval_prompt,
+            channels,
+            slack,
+            api_key=cfg.effective_eval_api_key,
+            pg=pg,
         )
         return 0
 
     try:
-        embedder = Embedder(base_url=cfg.llm_base_url, model=cfg.embedding_model,
-                            context_length=cfg.embedding_context_length,
-                            api_key=cfg.llm_api_key,
-                            input_prefix=cfg.embedding_prefix)
+        embedder = Embedder(
+            base_url=cfg.llm_base_url,
+            model=cfg.embedding_model,
+            context_length=cfg.embedding_context_length,
+            api_key=cfg.llm_api_key,
+            input_prefix=cfg.embedding_prefix,
+        )
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)
         return 1

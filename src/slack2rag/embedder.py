@@ -20,10 +20,9 @@ import json
 import logging
 import math
 import re
-import urllib.request
 import urllib.error
+import urllib.request
 from collections import Counter
-from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +35,74 @@ class EmbeddingError(RuntimeError):
 
 SPARSE_VOCAB_SIZE = 2**16  # 65 536 hash buckets — low collision for typical text
 
-_STOPWORDS = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-    "on", "with", "at", "by", "from", "as", "into", "through", "during",
-    "before", "after", "above", "below", "between", "and", "but", "or",
-    "not", "no", "this", "that", "these", "those", "it", "its", "i",
-    "me", "my", "we", "our", "you", "your", "he", "she", "they", "them",
-})
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "and",
+        "but",
+        "or",
+        "not",
+        "no",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "she",
+        "they",
+        "them",
+    }
+)
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -53,19 +111,20 @@ def _token_hash(token: str) -> int:
     return int(hashlib.md5(token.encode()).hexdigest(), 16) % SPARSE_VOCAB_SIZE
 
 
-def tokenize_text(text: str) -> List[str]:
+def tokenize_text(text: str) -> list[str]:
     """Tokenize *text* into lower-case non-stopword terms (len > 1).
 
     Useful for both sparse encoding and term-frequency analysis.
     """
-    return [t for t in _TOKEN_RE.findall(text.lower())
-            if t not in _STOPWORDS and len(t) > 1]
+    return [
+        t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS and len(t) > 1
+    ]
 
 
 class SparseEncoder:
     """Deterministic BM25-like sparse vector encoder (no training required)."""
 
-    def encode(self, texts: List[str]) -> List[dict]:
+    def encode(self, texts: list[str]) -> list[dict]:
         """Return a list of dicts with 'indices' and 'values' keys."""
         return [self._encode_one(t) for t in texts]
 
@@ -90,8 +149,13 @@ class SparseEncoder:
 # ── OpenAI-compatible embedder ────────────────────────────────────────────────
 
 _CONTEXT_ERROR_FRAGMENTS = (
-    "context length", "context window", "too long", "exceeds",
-    "maximum context", "maximum tokens", "maximum_context",
+    "context length",
+    "context window",
+    "too long",
+    "exceeds",
+    "maximum context",
+    "maximum tokens",
+    "maximum_context",
     "context_length_exceeded",
 )
 _MIN_TEXT_LEN = 64
@@ -146,11 +210,17 @@ class Embedder:
         # the first bad response and we send one input per request afterwards.
         self._force_single_input = False
 
-        logger.info("Connecting to LLM at %s  embedding model: %s", self._base_url, model)
+        logger.info(
+            "Connecting to LLM at %s  embedding model: %s", self._base_url, model
+        )
         if self._input_prefix:
             logger.info("  embedding input prefix: %r", self._input_prefix)
         if self._max_chars:
-            logger.info("  context limit: %d tokens (~%d chars)", context_length, self._max_chars)
+            logger.info(
+                "  context limit: %d tokens (~%d chars)",
+                context_length,
+                self._max_chars,
+            )
         try:
             probe = self._call_api(self._prepare_texts(["dimension probe"]))
         except EmbeddingError:
@@ -169,7 +239,7 @@ class Embedder:
 
     # ── public entry point ─────────────────────────────────────────────────
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """Return a list of float vectors, one per input text.
 
         Pre-truncates texts to the configured context limit, and
@@ -193,7 +263,7 @@ class Embedder:
 
     # ── internals ──────────────────────────────────────────────────────────
 
-    def _prepare_texts(self, texts: List[str]) -> List[str]:
+    def _prepare_texts(self, texts: list[str]) -> list[str]:
         """Apply model-specific input formatting and context truncation."""
         if self._input_prefix:
             texts = [f"{self._input_prefix}{text}" for text in texts]
@@ -201,7 +271,7 @@ class Embedder:
             texts = [_truncate_at_word(t, self._max_chars) for t in texts]
         return texts
 
-    def _embed_single(self, text: str) -> List[float]:
+    def _embed_single(self, text: str) -> list[float]:
         """Embed a single text, halving it on each retry if it's too long."""
         attempt = 0
         current = text
@@ -215,7 +285,9 @@ class Embedder:
                     logger.error(
                         "Text still too long after %d truncation attempts "
                         "(%d chars).  Giving up.  Preview: %.200s",
-                        attempt, len(current), text,
+                        attempt,
+                        len(current),
+                        text,
                     )
                     raise EmbeddingError(
                         f"Cannot embed text even at {len(current)} chars "
@@ -225,16 +297,18 @@ class Embedder:
                 logger.warning(
                     "Context-length error (attempt %d) — truncating to %d "
                     "chars and retrying.  Preview: %.120s",
-                    attempt, len(current), text,
+                    attempt,
+                    len(current),
+                    text,
                 )
 
-    def _call_api(self, texts: List[str]) -> List[List[float]]:
+    def _call_api(self, texts: list[str]) -> list[list[float]]:
         """Call the OpenAI-compatible /embeddings endpoint.
 
         Raises _ContextLengthError for context-window rejections,
         EmbeddingError for everything else.
         """
-        results: List[List[float]] = []
+        results: list[list[float]] = []
 
         chunk_size = 1 if self._force_single_input else self._request_batch_size
         i = 0
@@ -266,7 +340,7 @@ class Embedder:
             i += len(batch)
         return results
 
-    def _post_embeddings(self, batch: List[str]) -> List[List[float]]:
+    def _post_embeddings(self, batch: list[str]) -> list[list[float]]:
         """Send one HTTP request and return validated embeddings.
 
         Raises _ContextLengthError for context errors, _MalformedBatchError
@@ -274,10 +348,12 @@ class Embedder:
         EmbeddingError for anything else.
         """
         endpoint = f"{self._base_url}/embeddings"
-        payload = json.dumps({
-            "model": self._model,
-            "input": batch,
-        }).encode()
+        payload = json.dumps(
+            {
+                "model": self._model,
+                "input": batch,
+            }
+        ).encode()
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -309,18 +385,24 @@ class Embedder:
         return self._extract_embeddings(data, expected=len(batch), endpoint=endpoint)
 
     def _extract_embeddings(
-        self, data: object, expected: int, endpoint: str,
-    ) -> List[List[float]]:
+        self,
+        data: object,
+        expected: int,
+        endpoint: str,
+    ) -> list[list[float]]:
         """Pull embedding vectors out of an OpenAI-shaped response.
 
         Sorts items by their `index` field so callers see the same order
         as the input regardless of how the server orders the response.
         Raises _MalformedBatchError if any item is missing/null/invalid.
         """
-        if not isinstance(data, dict) or "data" not in data or not isinstance(data["data"], list):
+        if (
+            not isinstance(data, dict)
+            or "data" not in data
+            or not isinstance(data["data"], list)
+        ):
             raise EmbeddingError(
-                f"Unexpected response shape from {endpoint}: "
-                f"{json.dumps(data)[:300]}"
+                f"Unexpected response shape from {endpoint}: {json.dumps(data)[:300]}"
             )
         items = data["data"]
         if len(items) != expected:
@@ -329,7 +411,7 @@ class Embedder:
                 f"input(s).  Response: {json.dumps(data)[:300]}"
             )
 
-        ordered: List[List[float] | None] = [None] * expected
+        ordered: list[list[float] | None] = [None] * expected
         for slot, item in enumerate(items):
             if not isinstance(item, dict):
                 raise _MalformedBatchError()

@@ -37,7 +37,7 @@ def _name(uid: str) -> str:
 
 
 def _now() -> float:
-    return datetime.datetime.now(datetime.timezone.utc).timestamp()
+    return datetime.datetime.now(datetime.UTC).timestamp()
 
 
 def _build(root: dict, replies: list[dict] | None = None, **kwargs) -> list[Document]:
@@ -132,11 +132,15 @@ def test_chunk_custom_limits() -> None:
 
 
 def test_format_message() -> None:
-    assert processor._format_message({"text": " hi "}, "alice", _identity) == "[alice]: hi"
+    assert (
+        processor._format_message({"text": " hi "}, "alice", _identity) == "[alice]: hi"
+    )
     assert processor._format_message({"text": "   "}, "alice", _identity) == ""
     assert processor._format_message({}, "alice", _identity) == ""
     assert (
-        processor._format_message({"text": "<@U2>"}, "alice", lambda t: t.replace("<@U2>", "@bob"))
+        processor._format_message(
+            {"text": "<@U2>"}, "alice", lambda t: t.replace("<@U2>", "@bob")
+        )
         == "[alice]: @bob"
     )
 
@@ -178,16 +182,33 @@ def test_standalone_message_document_fields() -> None:
     assert payload["source_system"] == "slack"
     assert payload["text"] == d.text
     assert set(payload) == {
-        "channel_id", "channel_name", "ts", "date", "datetime", "user_id",
-        "user_name", "thread_ts", "reply_count", "text", "permalink",
-        "channel_topic", "reaction_count", "reactions", "attachments",
-        "doc_type", "source_system",
+        "channel_id",
+        "channel_name",
+        "ts",
+        "date",
+        "datetime",
+        "user_id",
+        "user_name",
+        "thread_ts",
+        "reply_count",
+        "text",
+        "permalink",
+        "channel_topic",
+        "reaction_count",
+        "reactions",
+        "attachments",
+        "doc_type",
+        "source_system",
     }
 
 
 def test_defaults_for_missing_user_and_channel_name() -> None:
     docs = build_documents(
-        {"ts": TS, "text": "hi"}, [], {"id": "C7"}, _identity, _name,
+        {"ts": TS, "text": "hi"},
+        [],
+        {"id": "C7"},
+        _identity,
+        _name,
     )
     assert docs[0].user_id == "unknown"
     assert docs[0].user_name == "unknown"
@@ -203,13 +224,19 @@ def test_explicit_thread_ts_is_preserved() -> None:
 
 def test_empty_messages_produce_no_documents() -> None:
     assert _build({"ts": TS, "user": "U1", "text": ""}) == []
-    assert _build({"ts": TS, "user": "U1", "text": "  "}, [{"user": "U2", "text": ""}]) == []
+    assert (
+        _build({"ts": TS, "user": "U1", "text": "  "}, [{"user": "U2", "text": ""}])
+        == []
+    )
 
 
 def test_resolve_text_is_applied() -> None:
     docs = build_documents(
         {"ts": TS, "user": "U1", "text": "ping <@U2>"},
-        [], CHANNEL, lambda t: t.replace("<@U2>", "@bob"), _name,
+        [],
+        CHANNEL,
+        lambda t: t.replace("<@U2>", "@bob"),
+        _name,
     )
     assert docs[0].text == "[alice]: ping @bob"
 
@@ -361,7 +388,7 @@ def test_channel_stats_cadence_counts_windows() -> None:
     c = cs.cadence()
     assert c["messages_last_7d"] == 1
     assert c["messages_last_30d"] == 2
-    expected = datetime.datetime.fromtimestamp(now - 3600, tz=datetime.timezone.utc)
+    expected = datetime.datetime.fromtimestamp(now - 3600, tz=datetime.UTC)
     assert c["last_message_date"] == expected.strftime("%Y-%m-%d")
 
 
@@ -451,7 +478,7 @@ def test_channel_summary_full_with_stats() -> None:
     assert "Created: 2024-01-25" in lines
     assert "Indexed messages: 1,234" in lines
     assert "This channel has no indexed messages yet." not in lines
-    today = datetime.datetime.fromtimestamp(now - 60, tz=datetime.timezone.utc)
+    today = datetime.datetime.fromtimestamp(now - 60, tz=datetime.UTC)
     assert f"Last message: {today:%Y-%m-%d}" in lines
     assert "Messages in last 7 days: 1" in lines
     assert "Messages in last 30 days: 1" in lines
@@ -489,7 +516,12 @@ def test_channel_summary_purpose_same_as_topic_and_empty_stats() -> None:
 def test_workspace_summary_sorts_by_count() -> None:
     channels = [
         {"id": "C1", "name": "quiet", "num_members": 3},
-        {"id": "C2", "name": "busy", "topic": {"value": "Main"}, "purpose": {"value": "P"}},
+        {
+            "id": "C2",
+            "name": "busy",
+            "topic": {"value": "Main"},
+            "purpose": {"value": "P"},
+        },
         {"id": "C3", "purpose": {"value": "Only purpose"}},
     ]
     doc = build_workspace_summary(channels, {"C1": 5, "C2": 2000})
@@ -508,7 +540,9 @@ def test_workspace_summary_sorts_by_count() -> None:
 
 def test_workspace_summary_singular() -> None:
     doc = build_workspace_summary([{"id": "C1", "name": "a"}], {"C1": 1})
-    assert doc.text.startswith("This Slack workspace has 1 indexed public channel with 1 total")
+    assert doc.text.startswith(
+        "This Slack workspace has 1 indexed public channel with 1 total"
+    )
 
 
 # ── build_user_summary ────────────────────────────────────────────────────────

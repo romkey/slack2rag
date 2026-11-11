@@ -20,10 +20,9 @@ import datetime
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import List, Optional
 
-MAX_CHARS = 1_500   # target document size before chunking
-OVERLAP = 200       # character overlap between consecutive chunks
+MAX_CHARS = 1_500  # target document size before chunking
+OVERLAP = 200  # character overlap between consecutive chunks
 THREAD_SUMMARY_MIN_REPLIES = 3
 REPLY_PREVIEW_CHARS = 120
 
@@ -32,22 +31,22 @@ REPLY_PREVIEW_CHARS = 120
 class Document:
     """Unit of text that will be embedded and stored in the vector DB."""
 
-    id: str                       # stable UUID derived from channel+ts
-    text: str                     # clean, human-readable content
+    id: str  # stable UUID derived from channel+ts
+    text: str  # clean, human-readable content
     channel_id: str
     channel_name: str
-    ts: str                       # Slack timestamp of the root message
-    date: str                     # ISO-8601 date, e.g. "2024-01-25"
-    datetime_str: str             # ISO-8601 datetime, e.g. "2024-01-25T14:30:00Z"
+    ts: str  # Slack timestamp of the root message
+    date: str  # ISO-8601 date, e.g. "2024-01-25"
+    datetime_str: str  # ISO-8601 datetime, e.g. "2024-01-25T14:30:00Z"
     user_id: str
     user_name: str
-    thread_ts: Optional[str]      # None for standalone messages
+    thread_ts: str | None  # None for standalone messages
     reply_count: int
     permalink: str = ""
     channel_topic: str = ""
     reaction_count: int = 0
-    reactions: List[str] = field(default_factory=list)
-    attachments: List[str] = field(default_factory=list)
+    reactions: list[str] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
     doc_type: str = "message"
     source_system: str = "slack"
 
@@ -76,19 +75,20 @@ class Document:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _ts_to_date(ts: str) -> str:
     try:
-        dt = datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc)
+        dt = datetime.datetime.fromtimestamp(float(ts), tz=datetime.UTC)
         return dt.strftime("%Y-%m-%d")
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return ""
 
 
 def _ts_to_datetime(ts: str) -> str:
     try:
-        dt = datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc)
+        dt = datetime.datetime.fromtimestamp(float(ts), tz=datetime.UTC)
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return ""
 
 
@@ -99,7 +99,7 @@ def _make_id(channel_id: str, ts: str, chunk_idx: int = 0) -> str:
     return str(uuid.uuid5(namespace, name))
 
 
-def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> List[str]:
+def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> list[str]:
     """Split *text* into overlapping chunks, preferring line boundaries.
 
     Lines are kept whole whenever possible.  Only lines longer than
@@ -109,8 +109,8 @@ def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> Lis
         return [text]
 
     lines = text.split("\n")
-    chunks: List[str] = []
-    current_lines: List[str] = []
+    chunks: list[str] = []
+    current_lines: list[str] = []
     current_len = 0
 
     for line in lines:
@@ -120,7 +120,7 @@ def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> Lis
             chunks.append("\n".join(current_lines))
 
             # Overlap: keep trailing lines that fit within the overlap budget
-            overlap_lines: List[str] = []
+            overlap_lines: list[str] = []
             overlap_len = 0
             for prev_line in reversed(current_lines):
                 if overlap_len + len(prev_line) + 1 > overlap:
@@ -129,7 +129,9 @@ def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> Lis
                 overlap_len += len(prev_line) + 1
 
             current_lines = overlap_lines
-            current_len = sum(len(cl) for cl in current_lines) + max(len(current_lines) - 1, 0)
+            current_len = sum(len(cl) for cl in current_lines) + max(
+                len(current_lines) - 1, 0
+            )
 
         # Handle single lines longer than max_chars with hard split
         if len(line) > max_chars and not current_lines:
@@ -157,9 +159,10 @@ def _format_message(msg: dict, user_name: str, resolve_text) -> str:
 
 # ── public API ────────────────────────────────────────────────────────────────
 
+
 def build_documents(
     root_msg: dict,
-    replies: List[dict],
+    replies: list[dict],
     channel: dict,
     resolve_text,
     get_user_name,
@@ -167,11 +170,11 @@ def build_documents(
     permalink: str = "",
     channel_topic: str = "",
     reaction_count: int = 0,
-    reactions: Optional[List[str]] = None,
-    attachments: Optional[List[str]] = None,
+    reactions: list[str] | None = None,
+    attachments: list[str] | None = None,
     min_message_length: int = 0,
     reaction_boost_threshold: int = 0,
-) -> List[Document]:
+) -> list[Document]:
     """
     Build one or more Documents from a root message and its replies.
 
@@ -196,13 +199,13 @@ def build_documents(
     date = _ts_to_date(ts)
     datetime_str = _ts_to_datetime(ts)
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     root_text = _format_message(root_msg, root_user_name, resolve_text)
     if root_text:
         lines.append(root_text)
 
-    reply_lines: List[str] = []
+    reply_lines: list[str] = []
     for reply in replies:
         user_id = reply.get("user", "unknown")
         user_name = get_user_name(user_id)
@@ -215,17 +218,20 @@ def build_documents(
     if not full_text:
         return []
 
-    if reply_count == 0 and min_message_length > 0 and len(full_text) < min_message_length:
+    if (
+        reply_count == 0
+        and min_message_length > 0
+        and len(full_text) < min_message_length
+    ):
         return []
 
     boosted = (
-        reaction_boost_threshold > 0
-        and reaction_count >= reaction_boost_threshold
+        reaction_boost_threshold > 0 and reaction_count >= reaction_boost_threshold
     )
     embed_text = f"[highlighted by team] {full_text}" if boosted else full_text
 
     chunks = _chunk(embed_text)
-    docs: List[Document] = []
+    docs: list[Document] = []
 
     for idx, chunk_text in enumerate(chunks):
         doc_text = chunk_text
@@ -280,7 +286,7 @@ def build_documents(
 def _build_thread_summary(
     *,
     root_text: str,
-    reply_lines: List[str],
+    reply_lines: list[str],
     channel_id: str,
     channel_name: str,
     ts: str,
@@ -293,8 +299,8 @@ def _build_thread_summary(
     permalink: str,
     channel_topic: str,
     reaction_count: int,
-    reactions: List[str],
-    attachments: List[str],
+    reactions: list[str],
+    attachments: list[str],
 ) -> Document:
     """Build a condensed single-chunk summary of a thread.
 
@@ -314,7 +320,7 @@ def _build_thread_summary(
 
     text = "\n".join(lines)
     if len(text) > MAX_CHARS:
-        text = text[:MAX_CHARS - 1] + "…"
+        text = text[: MAX_CHARS - 1] + "…"
 
     return Document(
         id=_make_summary_id(f"thread:{channel_id}:{ts}"),
@@ -339,6 +345,7 @@ def _build_thread_summary(
 
 # ── Summary documents ─────────────────────────────────────────────────────────
 
+
 def _make_summary_id(key: str) -> str:
     """Stable UUID-5 for a summary document."""
     namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -348,23 +355,24 @@ def _make_summary_id(key: str) -> str:
 def _ts_to_iso_date(ts_str: str) -> str:
     """Convert a Slack-style unix timestamp string to YYYY-MM-DD."""
     try:
-        dt = datetime.datetime.fromtimestamp(float(ts_str), tz=datetime.timezone.utc)
+        dt = datetime.datetime.fromtimestamp(float(ts_str), tz=datetime.UTC)
         return dt.strftime("%Y-%m-%d")
-    except (ValueError, OSError, TypeError):
+    except ValueError, OSError, TypeError:
         return ""
 
 
 @dataclass
 class ChannelStats:
     """Accumulated per-channel statistics built during sync."""
+
     token_counts: Counter = field(default_factory=Counter)
     user_counts: Counter = field(default_factory=Counter)
     timestamps: list[float] = field(default_factory=list)
 
-    def top_terms(self, n: int = 20) -> List[str]:
+    def top_terms(self, n: int = 20) -> list[str]:
         return [term for term, _ in self.token_counts.most_common(n)]
 
-    def top_posters(self, n: int = 10, get_name=None) -> List[str]:
+    def top_posters(self, n: int = 10, get_name=None) -> list[str]:
         names = []
         for uid, _ in self.user_counts.most_common(n):
             names.append(get_name(uid) if get_name else uid)
@@ -372,14 +380,14 @@ class ChannelStats:
 
     def cadence(self) -> dict:
         """Return messages_last_7d, messages_last_30d, last_message_date."""
-        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        now = datetime.datetime.now(datetime.UTC).timestamp()
         d7 = now - 7 * 86400
         d30 = now - 30 * 86400
         last_ts = max(self.timestamps) if self.timestamps else 0
         last_date = ""
         if last_ts:
             last_date = datetime.datetime.fromtimestamp(
-                last_ts, tz=datetime.timezone.utc
+                last_ts, tz=datetime.UTC
             ).strftime("%Y-%m-%d")
         return {
             "messages_last_7d": sum(1 for t in self.timestamps if t >= d7),
@@ -396,19 +404,19 @@ class ChannelStats:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ChannelStats":
+    def from_dict(cls, data: dict) -> ChannelStats:
         cs = cls()
         cs.token_counts = Counter(data.get("token_counts", {}))
         cs.user_counts = Counter(data.get("user_counts", {}))
         cs.timestamps = data.get("timestamps", [])
         return cs
 
-    def merge(self, other: "ChannelStats") -> None:
+    def merge(self, other: ChannelStats) -> None:
         """Merge stats from an incremental sync into the accumulated total."""
         self.token_counts += other.token_counts
         self.user_counts += other.user_counts
         self.timestamps.extend(other.timestamps)
-        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        now = datetime.datetime.now(datetime.UTC).timestamp()
         cutoff = now - 90 * 86400
         self.timestamps = [t for t in self.timestamps if t >= cutoff]
 
@@ -416,7 +424,7 @@ class ChannelStats:
 def build_channel_summary(
     channel: dict,
     message_count: int,
-    stats: Optional[ChannelStats] = None,
+    stats: ChannelStats | None = None,
     get_user_name=None,
 ) -> Document:
     """Build a summary document describing a single channel.
@@ -459,7 +467,7 @@ def build_channel_summary(
         if posters:
             lines.append(f"Most active members: {', '.join(posters)}")
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return Document(
         id=_make_summary_id(f"channel:{channel_id}"),
@@ -479,7 +487,7 @@ def build_channel_summary(
 
 
 def build_workspace_summary(
-    channels: List[dict],
+    channels: list[dict],
     channel_counts: dict[str, int],
 ) -> Document:
     """Build a summary document listing all indexed channels.
@@ -496,7 +504,9 @@ def build_workspace_summary(
         "Channels:",
     ]
 
-    sorted_channels = sorted(channels, key=lambda c: channel_counts.get(c["id"], 0), reverse=True)
+    sorted_channels = sorted(
+        channels, key=lambda c: channel_counts.get(c["id"], 0), reverse=True
+    )
     for ch in sorted_channels:
         name = ch.get("name", ch.get("id", "?"))
         topic = ch.get("topic", {}).get("value", "")
@@ -508,7 +518,7 @@ def build_workspace_summary(
         member_str = f", {members} members" if members else ""
         lines.append(f"  #{name} ({count:,} messages{member_str}) — {desc}")
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return Document(
         id=_make_summary_id("workspace"),
@@ -528,7 +538,7 @@ def build_workspace_summary(
 
 def build_user_summary(
     profile: dict,
-    active_channels: Optional[List[str]] = None,
+    active_channels: list[str] | None = None,
 ) -> Document:
     """Build a summary document for a single Slack user.
 
@@ -539,7 +549,12 @@ def build_user_summary(
     has posted, most-active first.
     """
     uid = profile["user_id"]
-    display = profile.get("display_name") or profile.get("real_name") or profile.get("username") or uid
+    display = (
+        profile.get("display_name")
+        or profile.get("real_name")
+        or profile.get("username")
+        or uid
+    )
     real = profile.get("real_name", "")
     username = profile.get("username", "")
 
@@ -554,7 +569,9 @@ def build_user_summary(
         lines.append(f"Pronouns: {profile['pronouns']}")
     if profile.get("timezone_label"):
         tz = profile.get("timezone", "")
-        lines.append(f"Timezone: {profile['timezone_label']}" + (f" ({tz})" if tz else ""))
+        lines.append(
+            f"Timezone: {profile['timezone_label']}" + (f" ({tz})" if tz else "")
+        )
     if profile.get("status_text"):
         emoji = profile.get("status_emoji", "")
         lines.append(f"Status: {profile['status_text']} {emoji}".strip())
@@ -567,7 +584,7 @@ def build_user_summary(
     if active_channels:
         lines.append(f"Active in: {', '.join('#' + c for c in active_channels)}")
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return Document(
         id=_make_summary_id(f"user:{uid}"),
@@ -585,7 +602,7 @@ def build_user_summary(
     )
 
 
-def build_team_summary(profiles: List[dict]) -> Document:
+def build_team_summary(profiles: list[dict]) -> Document:
     """Build a summary document listing all team members.
 
     Surfaces when users ask "who is on the team?", "how many people
@@ -594,7 +611,9 @@ def build_team_summary(profiles: List[dict]) -> Document:
     active = [p for p in profiles if not p.get("deleted") and not p.get("is_bot")]
     bots = [p for p in profiles if p.get("is_bot") and not p.get("deleted")]
 
-    lines = [f"This Slack workspace has {len(active)} active team member{'s' if len(active) != 1 else ''}"]
+    lines = [
+        f"This Slack workspace has {len(active)} active team member{'s' if len(active) != 1 else ''}"
+    ]
     if bots:
         lines[0] += f" and {len(bots)} bot{'s' if len(bots) != 1 else ''}."
     else:
@@ -602,8 +621,16 @@ def build_team_summary(profiles: List[dict]) -> Document:
 
     lines.append("")
     lines.append("Team members:")
-    for p in sorted(active, key=lambda p: (p.get("real_name") or p.get("display_name") or "").lower()):
-        display = p.get("display_name") or p.get("real_name") or p.get("username") or p["user_id"]
+    for p in sorted(
+        active,
+        key=lambda p: (p.get("real_name") or p.get("display_name") or "").lower(),
+    ):
+        display = (
+            p.get("display_name")
+            or p.get("real_name")
+            or p.get("username")
+            or p["user_id"]
+        )
         parts = [f"  {display}"]
         if p.get("title"):
             parts.append(f"({p['title']})")
@@ -614,11 +641,19 @@ def build_team_summary(profiles: List[dict]) -> Document:
     if bots:
         lines.append("")
         lines.append("Bots:")
-        for p in sorted(bots, key=lambda p: (p.get("real_name") or p.get("display_name") or "").lower()):
-            display = p.get("display_name") or p.get("real_name") or p.get("username") or p["user_id"]
+        for p in sorted(
+            bots,
+            key=lambda p: (p.get("real_name") or p.get("display_name") or "").lower(),
+        ):
+            display = (
+                p.get("display_name")
+                or p.get("real_name")
+                or p.get("username")
+                or p["user_id"]
+            )
             lines.append(f"  {display}")
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return Document(
         id=_make_summary_id("team"),

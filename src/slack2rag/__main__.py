@@ -1,9 +1,9 @@
 """Command line: `slack2rag` or `python -m slack2rag`.
 
-    slack2rag [--check]        index Slack into Qdrant (the default command)
-    slack2rag run [--check]    the same, spelled out
-    slack2rag query TEXT...    semantic search over the index
-    slack2rag migrate          create or upgrade the PostgreSQL schema
+slack2rag [--check]        index Slack into Qdrant (the default command)
+slack2rag run [--check]    the same, spelled out
+slack2rag query TEXT...    semantic search over the index
+slack2rag migrate          create or upgrade the PostgreSQL schema
 """
 
 import logging
@@ -12,7 +12,8 @@ from collections.abc import Sequence
 
 from dotenv import load_dotenv
 
-from slack2rag import __version__, main as indexer, query
+from slack2rag import __version__, query
+from slack2rag import main as indexer
 from slack2rag.config import Config, ConfigError
 from slack2rag.pg_store import migrate
 
@@ -23,7 +24,9 @@ USAGE = __doc__ or ""
 
 def _settings() -> Config:
     """Settings from the environment (and a .env file in the working directory, if any)."""
-    load_dotenv(".env")  # a bare load_dotenv() searches from this file's directory, not the cwd
+    load_dotenv(
+        ".env"
+    )  # a bare load_dotenv() searches from this file's directory, not the cwd
     return Config.from_env()
 
 

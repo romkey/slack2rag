@@ -13,9 +13,8 @@ import json
 import logging
 import os
 import re
-import urllib.request
 import urllib.error
-from typing import List, Optional
+import urllib.request
 
 from .pg_store import PgStore
 
@@ -32,19 +31,21 @@ def _chat_completion(
     model: str,
     user_content: str,
     timeout: int = 120,
-) -> Optional[str]:
+) -> str | None:
     """Call /chat/completions and return the assistant's content string.
 
     Returns None on any HTTP/transport error (already logged).
     """
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": user_content}],
-        "response_format": {"type": "json_object"},
-        "temperature": 0,
-        "stream": False,
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": user_content}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+            "stream": False,
+        }
+    ).encode()
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -62,7 +63,10 @@ def _chat_completion(
             pass
         logger.error(
             "LLM returned HTTP %d for %s (model %r): %s",
-            exc.code, endpoint, model, body,
+            exc.code,
+            endpoint,
+            model,
+            body,
         )
         return None
     except urllib.error.URLError as exc:
@@ -71,16 +75,20 @@ def _chat_completion(
 
     try:
         return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
+    except KeyError, IndexError, TypeError:
         logger.error(
             "Unexpected chat-completions response shape from %s: %s",
-            endpoint, json.dumps(data)[:300],
+            endpoint,
+            json.dumps(data)[:300],
         )
         return None
 
 
 def score_message(
-    base_url: str, model: str, prompt: str, message: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    message: str,
     api_key: str = "",
 ) -> tuple[int | None, str]:
     """Ask the LLM to score *message* using *prompt*.
@@ -106,7 +114,8 @@ def score_message(
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         logger.warning(
             "JSON parse failed (%s).  Raw model response: %s",
-            exc, response_text,
+            exc,
+            response_text,
         )
         match = _SCORE_RE.search(response_text)
         if not match:
@@ -145,10 +154,10 @@ def run_eval(
     base_url: str,
     model: str,
     prompt: str,
-    channels: List[dict],
+    channels: list[dict],
     slack,
     api_key: str = "",
-    pg: Optional[PgStore] = None,
+    pg: PgStore | None = None,
 ) -> None:
     """Score every message in every channel and write results to files."""
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -157,8 +166,13 @@ def run_eval(
 
     logger.info("Eval mode: scoring messages with model %r at %s", model, base_url)
     logger.info("  Prompt: %.200s", prompt)
-    logger.info("  Threshold: >= %d → %s, < %d → %s",
-                GOOD_THRESHOLD, good_path, GOOD_THRESHOLD, bad_path)
+    logger.info(
+        "  Threshold: >= %d → %s, < %d → %s",
+        GOOD_THRESHOLD,
+        good_path,
+        GOOD_THRESHOLD,
+        bad_path,
+    )
 
     total = 0
     good_count = 0
@@ -192,7 +206,9 @@ def run_eval(
                 user_name = slack.get_user_name(user_id)
                 ts = msg["ts"]
 
-                score, reason = score_message(base_url, model, prompt, resolved_text, api_key=api_key)
+                score, reason = score_message(
+                    base_url, model, prompt, resolved_text, api_key=api_key
+                )
                 total += 1
 
                 if score is None:
@@ -200,11 +216,15 @@ def run_eval(
                     logger.warning(
                         "Eval: no score for message ts=%s in #%s — skipping.  "
                         "Preview: %.120s",
-                        ts, channel_name, resolved_text,
+                        ts,
+                        channel_name,
+                        resolved_text,
                     )
                     continue
 
-                line = _format_line(score, reason, channel_name, user_name, ts, resolved_text)
+                line = _format_line(
+                    score, reason, channel_name, user_name, ts, resolved_text
+                )
 
                 if score >= GOOD_THRESHOLD:
                     good_f.write(line)
@@ -216,11 +236,18 @@ def run_eval(
                 if total % 100 == 0:
                     logger.info(
                         "Eval progress: %d scored (%d good, %d bad, %d errors)",
-                        total, good_count, bad_count, errors,
+                        total,
+                        good_count,
+                        bad_count,
+                        errors,
                     )
 
     logger.info(
         "Eval complete: %d messages scored — %d good (>=%d), %d bad, %d errors",
-        total, good_count, GOOD_THRESHOLD, bad_count, errors,
+        total,
+        good_count,
+        GOOD_THRESHOLD,
+        bad_count,
+        errors,
     )
     logger.info("  Results: %s  %s", good_path, bad_path)

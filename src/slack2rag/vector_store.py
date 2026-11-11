@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Optional
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -110,7 +109,14 @@ class VectorStore:
 
     def _ensure_payload_indexes(self) -> None:
         """Create payload indexes if they don't already exist (idempotent)."""
-        for field_name in ("channel_id", "channel_name", "date", "user_id", "doc_type", "source_system"):
+        for field_name in (
+            "channel_id",
+            "channel_name",
+            "date",
+            "user_id",
+            "doc_type",
+            "source_system",
+        ):
             try:
                 self._client.create_payload_index(
                     collection_name=self._collection,
@@ -177,12 +183,14 @@ class VectorStore:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
     def upsert(
         self,
-        documents: List[Document],
-        vectors: List[List[float]],
-        sparse_vectors: Optional[List[dict]] = None,
+        documents: list[Document],
+        vectors: list[list[float]],
+        sparse_vectors: list[dict] | None = None,
     ) -> None:
         """Upsert *documents* with their corresponding *vectors*.
 
@@ -223,14 +231,14 @@ class VectorStore:
 
     def search(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int = 10,
-        channel_filter: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
+        channel_filter: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
         score_threshold: float = 0.0,
-        sparse_vector: Optional[dict] = None,
-    ) -> List[dict]:
+        sparse_vector: dict | None = None,
+    ) -> list[dict]:
         """
         Semantic search.  Returns a list of payload dicts sorted by relevance.
 
@@ -246,21 +254,27 @@ class VectorStore:
 
         if self._hybrid and sparse_vector:
             return self._hybrid_search(
-                query_vector, sparse_vector, limit, query_filter, score_threshold,
+                query_vector,
+                sparse_vector,
+                limit,
+                query_filter,
+                score_threshold,
             )
 
         return self._dense_search(query_vector, limit, query_filter, score_threshold)
 
     def _build_filter(
         self,
-        channel_filter: Optional[str],
-        date_from: Optional[str],
-        date_to: Optional[str],
-    ) -> Optional[qmodels.Filter]:
-        conditions: List[qmodels.Condition] = []
+        channel_filter: str | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> qmodels.Filter | None:
+        conditions: list[qmodels.Condition] = []
 
         if channel_filter:
-            key = "channel_id" if _CHANNEL_ID_RE.match(channel_filter) else "channel_name"
+            key = (
+                "channel_id" if _CHANNEL_ID_RE.match(channel_filter) else "channel_name"
+            )
             conditions.append(
                 qmodels.FieldCondition(
                     key=key,
@@ -280,11 +294,11 @@ class VectorStore:
 
     def _dense_search(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int,
-        query_filter: Optional[qmodels.Filter],
+        query_filter: qmodels.Filter | None,
         score_threshold: float,
-    ) -> List[dict]:
+    ) -> list[dict]:
         kwargs: dict = {
             "collection_name": self._collection,
             "query": query_vector,
@@ -297,19 +311,16 @@ class VectorStore:
 
         response = self._client.query_points(**kwargs)
 
-        return [
-            {"score": hit.score, **hit.payload}
-            for hit in response.points
-        ]
+        return [{"score": hit.score, **hit.payload} for hit in response.points]
 
     def _hybrid_search(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         sparse_vector: dict,
         limit: int,
-        query_filter: Optional[qmodels.Filter],
+        query_filter: qmodels.Filter | None,
         score_threshold: float,
-    ) -> List[dict]:
+    ) -> list[dict]:
         """Dense + sparse retrieval with Reciprocal Rank Fusion."""
         prefetch_limit = max(limit * 3, 20)
 
@@ -343,14 +354,13 @@ class VectorStore:
 
         response = self._client.query_points(**kwargs)
 
-        return [
-            {"score": hit.score, **hit.payload}
-            for hit in response.points
-        ]
+        return [{"score": hit.score, **hit.payload} for hit in response.points]
 
     def count(self) -> int:
         result = self._client.count(collection_name=self._collection)
-        return getattr(result, "count", None) or getattr(result, "points_count", None) or 0
+        return (
+            getattr(result, "count", None) or getattr(result, "points_count", None) or 0
+        )
 
     def count_by_channel(self, channel_id: str) -> int:
         """Return the number of message points with the given channel_id.
@@ -370,9 +380,15 @@ class VectorStore:
                 must_not=[
                     qmodels.FieldCondition(
                         key="doc_type",
-                        match=qmodels.MatchAny(any=["channel_summary", "workspace_summary",
-                                                      "user_summary", "team_summary",
-                                                      "thread_summary"]),
+                        match=qmodels.MatchAny(
+                            any=[
+                                "channel_summary",
+                                "workspace_summary",
+                                "user_summary",
+                                "team_summary",
+                                "thread_summary",
+                            ]
+                        ),
                     ),
                 ],
             ),

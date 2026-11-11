@@ -19,7 +19,6 @@ from slack2rag.pg_store import SchemaError
 from slack2rag.processor import ChannelStats
 from slack2rag.state import SyncState
 
-
 # ── shared fixtures ──────────────────────────────────────────────────────────
 
 
@@ -51,13 +50,20 @@ def fake_build(monkeypatch):
     return calls
 
 
-def _slack(messages: list[dict] | None = None, replies: dict | None = None) -> MagicMock:
+def _slack(
+    messages: list[dict] | None = None, replies: dict | None = None
+) -> MagicMock:
     slack = MagicMock()
     msgs = messages or []
-    slack.get_channel_messages.side_effect = lambda cid, oldest_ts=None: iter(list(msgs))
-    slack.get_thread_replies.side_effect = lambda cid, ts: list((replies or {}).get(ts, []))
+    slack.get_channel_messages.side_effect = lambda cid, oldest_ts=None: iter(
+        list(msgs)
+    )
+    slack.get_thread_replies.side_effect = lambda cid, ts: list(
+        (replies or {}).get(ts, [])
+    )
     slack.get_reactions.side_effect = lambda m: (
-        len(m.get("reactions", [])), [r["name"] for r in m.get("reactions", [])]
+        len(m.get("reactions", [])),
+        [r["name"] for r in m.get("reactions", [])],
     )
     slack.get_attachments.side_effect = lambda m: list(m.get("files", []))
     slack.make_permalink.side_effect = lambda cid, ts: f"https://x/{cid}/{ts}"
@@ -80,7 +86,11 @@ def test_build_docs_aggregates_reactions_and_attachments(tmp_path, fake_build) -
     slack = _slack()
     msg = {"ts": "1.0", "reactions": [{"name": "+1"}], "files": ["a.png"]}
     replies = [
-        {"ts": "1.1", "reactions": [{"name": "tada"}, {"name": "eyes"}], "files": ["b.pdf"]},
+        {
+            "ts": "1.1",
+            "reactions": [{"name": "tada"}, {"name": "eyes"}],
+            "files": ["b.pdf"],
+        },
         {"ts": "1.2"},
     ]
     channel = {"id": "C1", "name": "eng", "topic": "T"}
@@ -108,15 +118,30 @@ def test_sync_channel_indexes_batches_and_advances_cursor(tmp_path, fake_build) 
     cfg = _cfg(tmp_path, batch_size=2)
     msgs = [
         {"ts": "100.0", "user": "U1", "text": "deploy pipeline broken"},
-        {"ts": "300.0", "user": "U2", "text": "kubernetes deploy", "reply_count": 1,
-         "thread_ts": "300.0"},
+        {
+            "ts": "300.0",
+            "user": "U2",
+            "text": "kubernetes deploy",
+            "reply_count": 1,
+            "thread_ts": "300.0",
+        },
         {"ts": "200.0", "text": "anonymous"},
         # reply_count but not a thread root -> replies not fetched
-        {"ts": "400.0", "user": "U1", "text": "x", "reply_count": 2, "thread_ts": "1.0"},
+        {
+            "ts": "400.0",
+            "user": "U1",
+            "text": "x",
+            "reply_count": 2,
+            "thread_ts": "1.0",
+        },
         {"ts": "500.0", "user": "U1", "text": "tail"},
     ]
-    replies = {"300.0": [{"ts": "301.0", "user": "U3", "text": "deploy fixed"},
-                         {"ts": "302.0", "text": "anon reply"}]}
+    replies = {
+        "300.0": [
+            {"ts": "301.0", "user": "U3", "text": "deploy fixed"},
+            {"ts": "302.0", "text": "anon reply"},
+        ]
+    }
     slack = _slack(msgs, replies)
     store = MagicMock()
     emb = _embedder()
@@ -126,7 +151,14 @@ def test_sync_channel_indexes_batches_and_advances_cursor(tmp_path, fake_build) 
     pg = MagicMock()
 
     count, stats = main.sync_channel(
-        {"id": "C1", "name": "eng"}, slack, store, emb, sparse, state, cfg, pg=pg,
+        {"id": "C1", "name": "eng"},
+        slack,
+        store,
+        emb,
+        sparse,
+        state,
+        cfg,
+        pg=pg,
     )
 
     assert count == 5
@@ -147,7 +179,9 @@ def test_sync_channel_indexes_batches_and_advances_cursor(tmp_path, fake_build) 
     assert root["ts"] == "300.0" and len(rep) == 2
 
 
-def test_sync_channel_uses_cursor_and_no_new_messages(tmp_path, fake_build, caplog) -> None:
+def test_sync_channel_uses_cursor_and_no_new_messages(
+    tmp_path, fake_build, caplog
+) -> None:
     cfg = _cfg(tmp_path)
     state = SyncState(cfg.state_file)
     state.set_cursor("C1", "50.0")
@@ -155,7 +189,9 @@ def test_sync_channel_uses_cursor_and_no_new_messages(tmp_path, fake_build, capl
     store = MagicMock()
 
     with caplog.at_level(logging.INFO, logger="slack2rag"):
-        count, stats = main.sync_channel({"id": "C1"}, slack, store, _embedder(), None, state, cfg)
+        count, stats = main.sync_channel(
+            {"id": "C1"}, slack, store, _embedder(), None, state, cfg
+        )
 
     assert count == 0
     assert stats.timestamps == []
@@ -170,7 +206,9 @@ def test_sync_channel_without_sparse_or_pg(tmp_path, fake_build) -> None:
     state = SyncState(cfg.state_file)
     slack = _slack([{"ts": "10.0", "user": "U1", "text": "hello"}])
     store = MagicMock()
-    count, _ = main.sync_channel({"id": "C1"}, slack, store, _embedder(), None, state, cfg)
+    count, _ = main.sync_channel(
+        {"id": "C1"}, slack, store, _embedder(), None, state, cfg
+    )
     assert count == 1
     assert store.upsert.call_args.kwargs["sparse_vectors"] is None
     assert state.get_cursor("C1") == "10.0"
@@ -192,12 +230,25 @@ def test_refresh_threads(tmp_path, fake_build, monkeypatch) -> None:
     store = MagicMock()
     pg = MagicMock()
 
-    n = main.refresh_threads({"id": "C1", "name": "eng"}, slack, store, _embedder(), None,
-                             cfg, lookback_hours=2, pg=pg)
+    n = main.refresh_threads(
+        {"id": "C1", "name": "eng"},
+        slack,
+        store,
+        _embedder(),
+        None,
+        cfg,
+        lookback_hours=2,
+        pg=pg,
+    )
 
     assert n == 2
-    slack.get_channel_messages.assert_called_once_with("C1", oldest_ts=str(10_000.0 - 7200))
-    assert [c.args[1] for c in slack.get_thread_replies.call_args_list] == ["2.0", "4.0"]
+    slack.get_channel_messages.assert_called_once_with(
+        "C1", oldest_ts=str(10_000.0 - 7200)
+    )
+    assert [c.args[1] for c in slack.get_thread_replies.call_args_list] == [
+        "2.0",
+        "4.0",
+    ]
     assert store.upsert.call_count == 2
     assert pg.persist_channel_messages_and_users.call_count == 2
 
@@ -206,14 +257,19 @@ def test_refresh_threads_flushes_remainder(tmp_path, fake_build) -> None:
     cfg = _cfg(tmp_path, batch_size=10)
     slack = _slack([{"ts": "2.0", "reply_count": 1, "thread_ts": "2.0"}])
     store = MagicMock()
-    assert main.refresh_threads({"id": "C1"}, slack, store, _embedder(), None, cfg, 1) == 1
+    assert (
+        main.refresh_threads({"id": "C1"}, slack, store, _embedder(), None, cfg, 1) == 1
+    )
     store.upsert.assert_called_once()
 
 
 def test_refresh_threads_nothing(tmp_path, fake_build) -> None:
     cfg = _cfg(tmp_path)
     store = MagicMock()
-    assert main.refresh_threads({"id": "C1"}, _slack([]), store, _embedder(), None, cfg, 1) == 0
+    assert (
+        main.refresh_threads({"id": "C1"}, _slack([]), store, _embedder(), None, cfg, 1)
+        == 0
+    )
     store.upsert.assert_not_called()
 
 
@@ -305,15 +361,26 @@ def test_index_summaries(monkeypatch) -> None:
     }
     assert calls["team"] == [4]
     texts = [d.text for d in store.upsert.call_args.args[0]]
-    assert texts == ["chan-C1", "chan-C2", "ws", "user-U1", "user-U2", "user-U3", "team"]
+    assert texts == [
+        "chan-C1",
+        "chan-C2",
+        "ws",
+        "user-U1",
+        "user-U2",
+        "user-U3",
+        "team",
+    ]
 
 
 # ── _get_channels ────────────────────────────────────────────────────────────
 
 
 def test_get_channels_include_list_and_blacklist(tmp_path, caplog) -> None:
-    cfg = _cfg(tmp_path, slack_channels="eng, ops,random",
-               slack_channel_blacklist="#random, C_OPS")
+    cfg = _cfg(
+        tmp_path,
+        slack_channels="eng, ops,random",
+        slack_channel_blacklist="#random, C_OPS",
+    )
     slack = MagicMock()
     slack.get_public_channels.return_value = [
         {"id": "C_ENG", "name": "eng"},
@@ -418,14 +485,25 @@ def test_check_llm_embedding_ok_no_eval(tmp_path, monkeypatch, caplog) -> None:
     monkeypatch.setattr(main, "Embedder", emb_cls)
     chat = MagicMock()
     monkeypatch.setattr(main, "_chat_completion", chat)
-    cfg = _cfg(tmp_path, llm_base_url="http://llm/v1", llm_api_key="k",
-               embedding_model="e", embedding_prefix="p:", embedding_context_length=10)
+    cfg = _cfg(
+        tmp_path,
+        llm_base_url="http://llm/v1",
+        llm_api_key="k",
+        embedding_model="e",
+        embedding_prefix="p:",
+        embedding_context_length=10,
+    )
 
     with caplog.at_level(logging.INFO, logger="slack2rag"):
         assert main._check_llm(cfg) is True
 
-    emb_cls.assert_called_once_with(base_url="http://llm/v1", model="e", context_length=10,
-                                    api_key="k", input_prefix="p:")
+    emb_cls.assert_called_once_with(
+        base_url="http://llm/v1",
+        model="e",
+        context_length=10,
+        api_key="k",
+        input_prefix="p:",
+    )
     chat.assert_not_called()
     assert "Embedding model OK (dimension=2, sample[0]=0.2500)" in caplog.text
     assert "Evaluator: skipped" in caplog.text
@@ -444,8 +522,14 @@ def test_check_llm_embedding_failure_and_eval_ok(tmp_path, monkeypatch, caplog) 
     monkeypatch.setattr(main, "Embedder", MagicMock(side_effect=EmbeddingError("down")))
     chat = MagicMock(return_value='  {"ok": true}\n')
     monkeypatch.setattr(main, "_chat_completion", chat)
-    cfg = _cfg(tmp_path, llm_base_url="http://llm/v1", llm_api_key="k1",
-               eval_model="judge", eval_base_url="http://eval/v1", eval_api_key="k2")
+    cfg = _cfg(
+        tmp_path,
+        llm_base_url="http://llm/v1",
+        llm_api_key="k1",
+        eval_model="judge",
+        eval_base_url="http://eval/v1",
+        eval_api_key="k2",
+    )
 
     with caplog.at_level(logging.INFO, logger="slack2rag"):
         assert main._check_llm(cfg) is False
@@ -459,13 +543,17 @@ def test_check_llm_embedding_failure_and_eval_ok(tmp_path, monkeypatch, caplog) 
     assert kwargs["timeout"] == 30
 
 
-def test_check_llm_eval_failure_uses_llm_fallback(tmp_path, monkeypatch, caplog) -> None:
+def test_check_llm_eval_failure_uses_llm_fallback(
+    tmp_path, monkeypatch, caplog
+) -> None:
     emb = MagicMock()
     emb.embed.return_value = [[1.0]]
     monkeypatch.setattr(main, "Embedder", MagicMock(return_value=emb))
     chat = MagicMock(return_value=None)
     monkeypatch.setattr(main, "_chat_completion", chat)
-    cfg = _cfg(tmp_path, llm_base_url="http://llm/v1", llm_api_key="k1", eval_model="judge")
+    cfg = _cfg(
+        tmp_path, llm_base_url="http://llm/v1", llm_api_key="k1", eval_model="judge"
+    )
 
     with caplog.at_level(logging.INFO, logger="slack2rag"):
         assert main._check_llm(cfg) is False
@@ -514,10 +602,22 @@ def app(monkeypatch, tmp_path, fresh_stop_event):
     """Patch all external collaborators used by main.main()."""
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("STATE_FILE", str(tmp_path / "state.json"))
-    for var in ("DATABASE_URL", "EVAL_TEST", "EVAL_PROMPT", "EVAL_MODEL", "RUN_ONCE",
-                "HYBRID_SEARCH", "SYNC_INTERVAL_MINUTES", "EMBEDDING_PREFIX",
-                "THREAD_UPDATE_LOOKBACK_HOURS", "EVAL_BASE_URL", "EVAL_API_KEY",
-                "LOG_LEVEL", "SLACK_CHANNEL_BLACKLIST", "SLACK_CHANNELS"):
+    for var in (
+        "DATABASE_URL",
+        "EVAL_TEST",
+        "EVAL_PROMPT",
+        "EVAL_MODEL",
+        "RUN_ONCE",
+        "HYBRID_SEARCH",
+        "SYNC_INTERVAL_MINUTES",
+        "EMBEDDING_PREFIX",
+        "THREAD_UPDATE_LOOKBACK_HOURS",
+        "EVAL_BASE_URL",
+        "EVAL_API_KEY",
+        "LOG_LEVEL",
+        "SLACK_CHANNEL_BLACKLIST",
+        "SLACK_CHANNELS",
+    ):
         monkeypatch.delenv(var, raising=False)
 
     m = SimpleNamespace()
@@ -587,7 +687,10 @@ def test_main_run_once_mode(app) -> None:
     app.pg_from_url.assert_called_once_with("")
     app.sparse_cls.assert_not_called()
     app.store_cls.assert_called_once_with(
-        url="http://qdrant:6333", collection="slack_messages", dimension=768, hybrid=False,
+        url="http://qdrant:6333",
+        collection="slack_messages",
+        dimension=768,
+        hybrid=False,
     )
     app.run_once.assert_called_once()
     args, kwargs = app.run_once.call_args
@@ -641,7 +744,11 @@ def test_main_embedder_failure_returns_one(app, caplog) -> None:
 
 def test_main_loop_survives_errors_and_waits(app, caplog) -> None:
     app.env.setenv("SYNC_INTERVAL_MINUTES", "2")
-    app.run_once.side_effect = [EmbeddingError("embed down"), RuntimeError("qdrant down"), None]
+    app.run_once.side_effect = [
+        EmbeddingError("embed down"),
+        RuntimeError("qdrant down"),
+        None,
+    ]
     waits = iter([None, None, app.stop_event.set])
 
     def fake_wait(timeout):
@@ -689,7 +796,8 @@ def test_main_eval_mode(app) -> None:
     app.env.setenv("EVAL_API_KEY", "ek")
     app.env.setenv("SLACK_CHANNEL_BLACKLIST", "random")
     app.slack.get_public_channels.return_value = [
-        {"id": "C1", "name": "eng"}, {"id": "C2", "name": "random"},
+        {"id": "C1", "name": "eng"},
+        {"id": "C2", "name": "random"},
     ]
 
     assert main.main([]) == 0

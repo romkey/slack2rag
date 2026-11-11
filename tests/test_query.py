@@ -44,9 +44,12 @@ def mocks(env):
     env.setattr(query, "VectorStore", store_cls)
     env.setattr(query, "SparseEncoder", sparse_cls)
     return {
-        "embedder_cls": embedder_cls, "embedder": embedder,
-        "store_cls": store_cls, "store": store,
-        "sparse_cls": sparse_cls, "sparse": sparse,
+        "embedder_cls": embedder_cls,
+        "embedder": embedder,
+        "store_cls": store_cls,
+        "store": store,
+        "sparse_cls": sparse_cls,
+        "sparse": sparse,
     }
 
 
@@ -81,7 +84,9 @@ def test_print_result_full(capsys) -> None:
     _print_result(0, hit, show_score=True)
     out = capsys.readouterr().out
     lines = out.splitlines()
-    assert lines[0].startswith("#1  #eng  2024-01-01 12:00  @alice  [1 reply]  1 reaction  ")
+    assert lines[0].startswith(
+        "#1  #eng  2024-01-01 12:00  @alice  [1 reply]  1 reaction  "
+    )
     assert lines[0].endswith("0.750")
     assert "█" in lines[0]
     assert lines[1] == "  topic: Engineering talk"
@@ -97,8 +102,14 @@ def test_print_result_full(capsys) -> None:
 
 
 def test_print_result_minimal_fallbacks(capsys) -> None:
-    hit = {"channel_id": "C9", "user_id": "U9", "date": "2024-02-02", "text": "hi",
-           "reply_count": 3, "reaction_count": 2}
+    hit = {
+        "channel_id": "C9",
+        "user_id": "U9",
+        "date": "2024-02-02",
+        "text": "hi",
+        "reply_count": 3,
+        "reaction_count": 2,
+    }
     _print_result(4, hit, show_score=False)
     out = capsys.readouterr().out
     header = out.splitlines()[0]
@@ -138,10 +149,25 @@ def test_main_with_results_and_args(mocks, capsys) -> None:
         {"score": 0.4, "channel_name": "ops", "user_name": "b", "text": "second"},
     ]
 
-    assert query.main([
-        "-n", "2", "-c", "eng", "--date-from", "2024-01-01", "--date-to", "2024-12-31",
-        "how", "do", "I", "deploy",
-    ]) == 0
+    assert (
+        query.main(
+            [
+                "-n",
+                "2",
+                "-c",
+                "eng",
+                "--date-from",
+                "2024-01-01",
+                "--date-to",
+                "2024-12-31",
+                "how",
+                "do",
+                "I",
+                "deploy",
+            ]
+        )
+        == 0
+    )
 
     out = capsys.readouterr().out
     assert 'Searching for: "how do I deploy"' in out
@@ -151,11 +177,17 @@ def test_main_with_results_and_args(mocks, capsys) -> None:
     assert "0.900" in out
 
     mocks["embedder_cls"].assert_called_once_with(
-        base_url="http://llm/v1", model="emb", context_length=8192,
-        api_key="", input_prefix="",
+        base_url="http://llm/v1",
+        model="emb",
+        context_length=8192,
+        api_key="",
+        input_prefix="",
     )
     mocks["store_cls"].assert_called_once_with(
-        url="http://q:6333", collection="coll", dimension=3, hybrid=False,
+        url="http://q:6333",
+        collection="coll",
+        dimension=3,
+        hybrid=False,
     )
     mocks["embedder"].embed.assert_called_once_with(["how do I deploy"])
     mocks["sparse_cls"].assert_not_called()
@@ -191,7 +223,8 @@ def test_main_hybrid_uses_sparse_encoder(mocks, env, capsys) -> None:
     mocks["sparse"].encode.assert_called_once_with(["hello"])
     assert mocks["store_cls"].call_args.kwargs["hybrid"] is True
     assert mocks["store"].search.call_args.kwargs["sparse_vector"] == {
-        "indices": [1], "values": [1.0],
+        "indices": [1],
+        "values": [1.0],
     }
 
 
@@ -227,11 +260,17 @@ def test_main_missing_token(monkeypatch) -> None:
 def test_main_uses_given_config_instead_of_env(mocks, monkeypatch, capsys) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     cfg = Config(
-        slack_bot_token="xoxb-given", qdrant_url="http://given:6333",
-        qdrant_collection="given", llm_base_url="http://given/v1", embedding_model="m",
+        slack_bot_token="xoxb-given",
+        qdrant_url="http://given:6333",
+        qdrant_collection="given",
+        llm_base_url="http://given/v1",
+        embedding_model="m",
     )
     assert query.main(["hello"], cfg=cfg) == 0
     mocks["store_cls"].assert_called_once_with(
-        url="http://given:6333", collection="given", dimension=3, hybrid=False,
+        url="http://given:6333",
+        collection="given",
+        dimension=3,
+        hybrid=False,
     )
     assert mocks["embedder_cls"].call_args.kwargs["base_url"] == "http://given/v1"

@@ -2,19 +2,39 @@
 
 from __future__ import annotations
 
-import pytest
-
 import dataclasses
+
+import pytest
 
 from slack2rag.config import Config, ConfigError
 
 _ALL_VARS = (
-    "QDRANT_URL", "QDRANT_COLLECTION", "DATABASE_URL", "SLACK_CHANNELS",
-    "SLACK_CHANNEL_BLACKLIST", "LLM_BASE_URL", "LLM_API_KEY", "EMBEDDING_MODEL",
-    "EMBEDDING_PREFIX", "EMBEDDING_CONTEXT_LENGTH", "SYNC_INTERVAL_MINUTES", "RUN_ONCE",
-    "STATE_FILE", "BATCH_SIZE", "SLACK_API_PAUSE", "MIN_MESSAGE_LENGTH", "SCORE_THRESHOLD",
-    "HYBRID_SEARCH", "THREAD_UPDATE_LOOKBACK_HOURS", "REACTION_BOOST_THRESHOLD",
-    "EVAL_TEST", "EVAL_PROMPT", "EVAL_MODEL", "EVAL_BASE_URL", "EVAL_API_KEY", "LOG_LEVEL",
+    "QDRANT_URL",
+    "QDRANT_COLLECTION",
+    "DATABASE_URL",
+    "SLACK_CHANNELS",
+    "SLACK_CHANNEL_BLACKLIST",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_PREFIX",
+    "EMBEDDING_CONTEXT_LENGTH",
+    "SYNC_INTERVAL_MINUTES",
+    "RUN_ONCE",
+    "STATE_FILE",
+    "BATCH_SIZE",
+    "SLACK_API_PAUSE",
+    "MIN_MESSAGE_LENGTH",
+    "SCORE_THRESHOLD",
+    "HYBRID_SEARCH",
+    "THREAD_UPDATE_LOOKBACK_HOURS",
+    "REACTION_BOOST_THRESHOLD",
+    "EVAL_TEST",
+    "EVAL_PROMPT",
+    "EVAL_MODEL",
+    "EVAL_BASE_URL",
+    "EVAL_API_KEY",
+    "LOG_LEVEL",
 )
 
 
@@ -28,8 +48,18 @@ def clean_env(monkeypatch):
 
 @pytest.mark.parametrize(
     "value,expected",
-    [("1", True), ("true", True), ("TRUE", True), (" Yes ", True), ("on", True),
-     ("0", False), ("false", False), ("no", False), ("", False), ("Off", False)],
+    [
+        ("1", True),
+        ("true", True),
+        ("TRUE", True),
+        (" Yes ", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("no", False),
+        ("", False),
+        ("Off", False),
+    ],
 )
 def test_bool_parsing(value, expected) -> None:
     env = {"SLACK_BOT_TOKEN": "xoxb-test", "RUN_ONCE": value, "HYBRID_SEARCH": value}
@@ -39,7 +69,9 @@ def test_bool_parsing(value, expected) -> None:
 
 
 def test_invalid_bool_raises_naming_variable() -> None:
-    with pytest.raises(ConfigError, match="HYBRID_SEARCH must be true or false, not 'maybe'"):
+    with pytest.raises(
+        ConfigError, match="HYBRID_SEARCH must be true or false, not 'maybe'"
+    ):
         Config.from_env({"SLACK_BOT_TOKEN": "xoxb-test", "HYBRID_SEARCH": "maybe"})
 
 
@@ -119,7 +151,11 @@ def test_numeric_and_bool_parsing(clean_env) -> None:
         ("MIN_MESSAGE_LENGTH", "1.5", "MIN_MESSAGE_LENGTH must be a whole number"),
         ("BATCH_SIZE", "0", "BATCH_SIZE must be at least 1, not 0"),
         ("SYNC_INTERVAL_MINUTES", "0", "SYNC_INTERVAL_MINUTES must be at least 1"),
-        ("REACTION_BOOST_THRESHOLD", "-1", "REACTION_BOOST_THRESHOLD must be at least 0"),
+        (
+            "REACTION_BOOST_THRESHOLD",
+            "-1",
+            "REACTION_BOOST_THRESHOLD must be at least 0",
+        ),
         ("SLACK_API_PAUSE", "fast", "SLACK_API_PAUSE must be a number, not 'fast'"),
         ("SCORE_THRESHOLD", "-0.1", "SCORE_THRESHOLD must be at least 0.0, not -0.1"),
     ],
@@ -137,7 +173,9 @@ def test_blank_numbers_use_defaults() -> None:
     assert cfg.api_pause == Config.api_pause
 
 
-@pytest.mark.parametrize("value,expected", [("debug", "DEBUG"), (" Warning ", "WARNING")])
+@pytest.mark.parametrize(
+    "value,expected", [("debug", "DEBUG"), (" Warning ", "WARNING")]
+)
 def test_log_level_normalised(value, expected) -> None:
     cfg = Config.from_env({"SLACK_BOT_TOKEN": "xoxb-test", "LOG_LEVEL": value})
     assert cfg.log_level == expected

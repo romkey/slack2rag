@@ -18,7 +18,6 @@ harmless.
 import json
 import logging
 import os
-from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +25,12 @@ logger = logging.getLogger(__name__)
 class SyncState:
     def __init__(self, path: str) -> None:
         self._path = path
-        self._data: Dict[str, str] = {}
+        self._data: dict[str, str] = {}
         self._load()
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def get_cursor(self, channel_id: str) -> Optional[str]:
+    def get_cursor(self, channel_id: str) -> str | None:
         """Return the latest timestamp synced for *channel_id*, or None."""
         return self._data.get(channel_id)
 

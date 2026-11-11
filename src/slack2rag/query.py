@@ -12,11 +12,9 @@ import argparse
 import sys
 import textwrap
 
-
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder
 from .vector_store import VectorStore
-
 
 _SCORE_BAR_WIDTH = 20
 
@@ -46,10 +44,14 @@ def _print_result(idx: int, hit: dict, show_score: bool) -> None:
 
     reaction_note = ""
     if reaction_count:
-        reaction_note = f"  {reaction_count} reaction{'s' if reaction_count != 1 else ''}"
+        reaction_note = (
+            f"  {reaction_count} reaction{'s' if reaction_count != 1 else ''}"
+        )
 
     display_date = dt if dt else date
-    header = f"#{idx + 1}  #{channel}  {display_date}  @{user}{thread_note}{reaction_note}"
+    header = (
+        f"#{idx + 1}  #{channel}  {display_date}  @{user}{thread_note}{reaction_note}"
+    )
     if show_score:
         header += f"  {_score_bar(score)}  {score:.3f}"
 
@@ -74,21 +76,25 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         prog="slack2rag query",
         description="Semantic search over indexed Slack messages.",
     )
-    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "-V", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument(
         "query",
         nargs="+",
         help="Search query (all positional args are joined into one query string)",
     )
     parser.add_argument(
-        "-n", "--limit",
+        "-n",
+        "--limit",
         type=int,
         default=5,
         metavar="N",
         help="Number of results to return (default: 5)",
     )
     parser.add_argument(
-        "-c", "--channel",
+        "-c",
+        "--channel",
         default=None,
         metavar="NAME_OR_ID",
         help="Restrict results to a specific channel",
@@ -118,10 +124,13 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         cfg = Config.from_env()
 
     try:
-        embedder = Embedder(base_url=cfg.llm_base_url, model=cfg.embedding_model,
-                            context_length=cfg.embedding_context_length,
-                            api_key=cfg.llm_api_key,
-                            input_prefix=cfg.embedding_prefix)
+        embedder = Embedder(
+            base_url=cfg.llm_base_url,
+            model=cfg.embedding_model,
+            context_length=cfg.embedding_context_length,
+            api_key=cfg.llm_api_key,
+            input_prefix=cfg.embedding_prefix,
+        )
     except EmbeddingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -156,7 +165,9 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
     if not results:
         print("No results found.")
         if cfg.score_threshold > 0:
-            print(f"  (score threshold is set to {cfg.score_threshold} — try lowering it)")
+            print(
+                f"  (score threshold is set to {cfg.score_threshold} — try lowering it)"
+            )
         return 0
 
     total = store.count()

@@ -43,7 +43,9 @@ def _int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) -> i
     return value
 
 
-def _float(env: Mapping[str, str], name: str, default: float, minimum: float = 0.0) -> float:
+def _float(
+    env: Mapping[str, str], name: str, default: float, minimum: float = 0.0
+) -> float:
     text = env.get(name, "").strip()
     if not text:
         return default
@@ -71,11 +73,15 @@ class Config:
     # OpenAI-compatible inference endpoint (works with OpenAI, Ollama's /v1
     # compatibility layer, llama.cpp server, vLLM, LM Studio, etc.).
     llm_base_url: str = "http://localhost:11434/v1"
-    llm_api_key: str = ""  # sent as Bearer token; some servers require any non-empty value
+    llm_api_key: str = (
+        ""  # sent as Bearer token; some servers require any non-empty value
+    )
 
     embedding_model: str = "nomic-embed-text"
     embedding_prefix: str = ""  # optional prefix prepended to each embedding input
-    embedding_context_length: int = 8192  # model context window in tokens; 0 = no truncation
+    embedding_context_length: int = (
+        8192  # model context window in tokens; 0 = no truncation
+    )
 
     sync_interval_minutes: int = 60
     run_once: bool = False
@@ -87,7 +93,9 @@ class Config:
     score_threshold: float = 0.0
     hybrid_search: bool = False
     thread_update_lookback_hours: int = 0
-    reaction_boost_threshold: int = 3  # prepend "[highlighted by team]" at this many reactions
+    reaction_boost_threshold: int = (
+        3  # prepend "[highlighted by team]" at this many reactions
+    )
 
     eval_test: bool = False
     eval_prompt: str = ""
@@ -109,7 +117,9 @@ class Config:
     def channel_blacklist(self) -> set[str]:
         if self.slack_channel_blacklist:
             return {
-                c.strip().lstrip("#") for c in self.slack_channel_blacklist.split(",") if c.strip()
+                c.strip().lstrip("#")
+                for c in self.slack_channel_blacklist.split(",")
+                if c.strip()
             }
         return set()
 

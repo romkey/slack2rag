@@ -7,7 +7,7 @@ Handles pagination, rate-limit back-off, and user-name caching.
 import logging
 import re
 import time
-from typing import Dict, Generator, List, Optional
+from collections.abc import Generator
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 _CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)\|([^>]*)>")
-_URL_RE = re.compile(r"<(https?://[^|>]+)(?:\|([^>]*))?>" )
+_URL_RE = re.compile(r"<(https?://[^|>]+)(?:\|([^>]*))?>")
 _SPECIAL_RE = re.compile(r"<!(here|channel|everyone)>")
 
 # Slack free-plan Tier 3/4 methods allow ~50 req/min.  A 1.2 s pause
@@ -27,11 +27,11 @@ DEFAULT_API_PAUSE = 1.2
 class SlackClient:
     def __init__(self, token: str, api_pause: float = DEFAULT_API_PAUSE) -> None:
         self._client = WebClient(token=token)
-        self._user_cache: Dict[str, str] = {}
-        self._user_profiles: Dict[str, dict] = {}
-        self._user_raw: Dict[str, dict] = {}
+        self._user_cache: dict[str, str] = {}
+        self._user_profiles: dict[str, dict] = {}
+        self._user_raw: dict[str, dict] = {}
         self._api_pause = api_pause
-        self._workspace_url: Optional[str] = None
+        self._workspace_url: str | None = None
 
     def _pace(self) -> None:
         """Sleep between API calls to stay under Slack's rate limits."""
@@ -53,7 +53,9 @@ class SlackClient:
                 self._workspace_url = ""
         return self._workspace_url
 
-    def make_permalink(self, channel_id: str, ts: str, thread_ts: Optional[str] = None) -> str:
+    def make_permalink(
+        self, channel_id: str, ts: str, thread_ts: str | None = None
+    ) -> str:
         """Construct a Slack permalink from channel ID and timestamp."""
         base = self.fetch_workspace_url()
         if not base:
@@ -66,14 +68,16 @@ class SlackClient:
 
     # ── channels ──────────────────────────────────────────────────────────────
 
-    def get_public_channels(self, channel_names: Optional[List[str]] = None) -> List[dict]:
+    def get_public_channels(
+        self, channel_names: list[str] | None = None
+    ) -> list[dict]:
         """
         Return public channels the bot can see.
 
         If *channel_names* is provided, only those channels are returned
         (matching by name or ID).
         """
-        channels: List[dict] = []
+        channels: list[dict] = []
         cursor = None
 
         while True:
@@ -103,8 +107,7 @@ class SlackClient:
         if channel_names:
             needle = {n.lstrip("#") for n in channel_names}
             channels = [
-                ch for ch in channels
-                if ch["name"] in needle or ch["id"] in needle
+                ch for ch in channels if ch["name"] in needle or ch["id"] in needle
             ]
             found = {ch["name"] for ch in channels} | {ch["id"] for ch in channels}
             for name in needle:
@@ -134,8 +137,8 @@ class SlackClient:
     def get_channel_messages(
         self,
         channel_id: str,
-        oldest_ts: Optional[str] = None,
-    ) -> Generator[dict, None, None]:
+        oldest_ts: str | None = None,
+    ) -> Generator[dict]:
         """
         Yield every top-level message in *channel_id*, newest-first.
 
@@ -161,12 +164,19 @@ class SlackClient:
                         continue  # retry after joining
                     return
                 else:
-                    logger.error("conversations.history error for %s: %s", channel_id, error)
+                    logger.error(
+                        "conversations.history error for %s: %s", channel_id, error
+                    )
                 return
 
             for msg in resp.get("messages", []):
                 # Skip channel join/leave noise and bot messages without text
-                if msg.get("subtype") in ("channel_join", "channel_leave", "channel_purpose", "channel_topic"):
+                if msg.get("subtype") in (
+                    "channel_join",
+                    "channel_leave",
+                    "channel_purpose",
+                    "channel_topic",
+                ):
                     continue
                 yield msg
 
@@ -175,9 +185,9 @@ class SlackClient:
             if not cursor:
                 break
 
-    def get_thread_replies(self, channel_id: str, thread_ts: str) -> List[dict]:
+    def get_thread_replies(self, channel_id: str, thread_ts: str) -> list[dict]:
         """Return all replies in a thread (excludes the root message)."""
-        replies: List[dict] = []
+        replies: list[dict] = []
         cursor = None
 
         while True:
@@ -191,7 +201,9 @@ class SlackClient:
             except SlackApiError as exc:
                 logger.warning(
                     "conversations.replies error for thread %s/%s: %s",
-                    channel_id, thread_ts, exc.response["error"],
+                    channel_id,
+                    thread_ts,
+                    exc.response["error"],
                 )
                 return []
 
@@ -249,7 +261,7 @@ class SlackClient:
 
         logger.info("Prefetched %d user names", count)
 
-    def get_user_record(self, user_id: str) -> Optional[dict]:
+    def get_user_record(self, user_id: str) -> dict | None:
         """Return the full Slack user object for *user_id*, fetching if needed."""
         if user_id in self._user_raw:
             return self._user_raw[user_id]
@@ -282,11 +294,11 @@ class SlackClient:
         self._user_cache[user_id] = user_id
         return user_id
 
-    def user_records(self) -> List[dict]:
+    def user_records(self) -> list[dict]:
         """Return full user dicts seen via prefetch or users.info (for bulk export)."""
         return list(self._user_raw.values())
 
-    def get_user_profiles(self) -> Dict[str, dict]:
+    def get_user_profiles(self) -> dict[str, dict]:
         """Return all cached user profiles (populated by prefetch_users)."""
         return self._user_profiles
 
@@ -316,7 +328,7 @@ class SlackClient:
     # ── message metadata helpers ─────────────────────────────────────────────
 
     @staticmethod
-    def get_reactions(msg: dict) -> tuple[int, List[str]]:
+    def get_reactions(msg: dict) -> tuple[int, list[str]]:
         """Return (total_reaction_count, list_of_reaction_names) from a message."""
         reactions = msg.get("reactions", [])
         names = [r["name"] for r in reactions]
@@ -324,9 +336,9 @@ class SlackClient:
         return total, names
 
     @staticmethod
-    def get_attachments(msg: dict) -> List[str]:
+    def get_attachments(msg: dict) -> list[str]:
         """Return list of filenames from message attachments/files."""
-        filenames: List[str] = []
+        filenames: list[str] = []
         for f in msg.get("files", []):
             name = f.get("name") or f.get("title") or f.get("id", "unknown_file")
             filenames.append(name)

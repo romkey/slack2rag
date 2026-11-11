@@ -19,7 +19,7 @@ class _JsonResponse:
     def __init__(self, body: object) -> None:
         self._body = body
 
-    def __enter__(self) -> "_JsonResponse":
+    def __enter__(self) -> _JsonResponse:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -37,7 +37,11 @@ def _chat_body(content: str) -> dict:
 
 def _http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        "http://llm/v1/chat/completions", code, "err", {}, io.BytesIO(body),
+        "http://llm/v1/chat/completions",
+        code,
+        "err",
+        {},
+        io.BytesIO(body),
     )
 
 
@@ -84,7 +88,9 @@ def test_chat_completion_no_auth_header_without_key(monkeypatch) -> None:
     assert seen == [None]
 
 
-def test_chat_completion_http_error_returns_none_and_logs_body(monkeypatch, caplog) -> None:
+def test_chat_completion_http_error_returns_none_and_logs_body(
+    monkeypatch, caplog
+) -> None:
     def fake_urlopen(req, timeout):
         raise _http_error(500, b"model exploded")
 
@@ -128,8 +134,12 @@ def test_chat_completion_url_error_returns_none(monkeypatch, caplog) -> None:
         {"choices": "nope"},
     ],
 )
-def test_chat_completion_unexpected_shape_returns_none(monkeypatch, caplog, body) -> None:
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: _JsonResponse(body))
+def test_chat_completion_unexpected_shape_returns_none(
+    monkeypatch, caplog, body
+) -> None:
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda req, timeout: _JsonResponse(body)
+    )
     with caplog.at_level(logging.ERROR, logger="slack2rag.evaluator"):
         assert _chat_completion("http://llm/v1", "", "m", "hi") is None
     assert "Unexpected chat-completions response shape" in caplog.text
@@ -151,7 +161,9 @@ def _patch_completion(monkeypatch, content):
 
 def test_score_message_parses_json_and_builds_prompt(monkeypatch) -> None:
     calls = _patch_completion(monkeypatch, '  {"score": 8, "reason": "useful"}  ')
-    score, reason = score_message("http://b", "m", "Rate it", "hello world", api_key="k")
+    score, reason = score_message(
+        "http://b", "m", "Rate it", "hello world", api_key="k"
+    )
     assert (score, reason) == (8, "useful")
     base_url, api_key, model, content = calls[0]
     assert (base_url, api_key, model) == ("http://b", "k", "m")
@@ -226,13 +238,20 @@ def _fake_slack(messages_by_channel: dict) -> MagicMock:
     )
     slack.resolve_text.side_effect = lambda t: t.upper()
     slack.get_user_name.side_effect = lambda uid: f"name-{uid}"
-    slack.get_user_record.side_effect = lambda uid: {"id": uid} if uid != "U_NONE" else None
+    slack.get_user_record.side_effect = lambda uid: (
+        {"id": uid} if uid != "U_NONE" else None
+    )
     return slack
 
 
 def test_run_eval_writes_good_and_bad(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(evaluator, "RESULTS_DIR", str(tmp_path / "results"))
-    scores = {"GREAT": (9, "great"), "MEH": (3, "meh"), "BROKEN": (None, ""), "EDGE": (7, "")}
+    scores = {
+        "GREAT": (9, "great"),
+        "MEH": (3, "meh"),
+        "BROKEN": (None, ""),
+        "EDGE": (7, ""),
+    }
     seen_keys: list = []
 
     def fake_score(base_url, model, prompt, message, api_key=""):
@@ -241,15 +260,17 @@ def test_run_eval_writes_good_and_bad(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(evaluator, "score_message", fake_score)
 
-    slack = _fake_slack({
-        "C1": [
-            {"ts": "1.0", "user": "U1", "text": "great"},
-            {"ts": "2.0", "user": "U2", "text": "meh"},
-            {"ts": "3.0", "user": "U1", "text": "   "},
-            {"ts": "4.0", "text": "broken"},
-        ],
-        "C2": [{"ts": "5.0", "user": "U3", "text": "edge"}],
-    })
+    slack = _fake_slack(
+        {
+            "C1": [
+                {"ts": "1.0", "user": "U1", "text": "great"},
+                {"ts": "2.0", "user": "U2", "text": "meh"},
+                {"ts": "3.0", "user": "U1", "text": "   "},
+                {"ts": "4.0", "text": "broken"},
+            ],
+            "C2": [{"ts": "5.0", "user": "U3", "text": "edge"}],
+        }
+    )
     channels = [{"id": "C1", "name": "general"}, {"id": "C2"}]
 
     run_eval("http://b", "m", "prompt", channels, slack, api_key="k")
@@ -283,7 +304,9 @@ def test_run_eval_persists_to_pg(monkeypatch, tmp_path) -> None:
     run_eval("u", "m", "p", [ch], slack, pg=pg)
 
     pg.upsert_channel.assert_called_once_with(ch)
-    assert [c.args for c in pg.upsert_message.call_args_list] == [("C1", m) for m in msgs]
+    assert [c.args for c in pg.upsert_message.call_args_list] == [
+        ("C1", m) for m in msgs
+    ]
     # only U1 had a record; U_NONE returned None; dict user / missing user skipped
     pg.upsert_user.assert_called_once_with({"id": "U1"})
     assert [c.args[0] for c in slack.get_user_record.call_args_list] == ["U1", "U_NONE"]

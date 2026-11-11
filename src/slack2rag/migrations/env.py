@@ -9,7 +9,9 @@ from sqlalchemy import create_engine, pool
 
 url = context.config.get_main_option("sqlalchemy.url")
 if not url:
-    raise RuntimeError("sqlalchemy.url is not set; run migrations with `slack2rag migrate`")
+    raise RuntimeError(
+        "sqlalchemy.url is not set; run migrations with `slack2rag migrate`"
+    )
 
 if context.is_offline_mode():
     context.configure(url=url, literal_binds=True)

@@ -14,7 +14,9 @@ import slack2rag.__main__ as cli
 from slack2rag import __version__
 from slack2rag.config import Config
 
-_CONFIG_VARS = [f.name.upper() for f in dataclasses.fields(Config)] + ["SLACK_API_PAUSE"]
+_CONFIG_VARS = [f.name.upper() for f in dataclasses.fields(Config)] + [
+    "SLACK_API_PAUSE"
+]
 
 
 @pytest.fixture
@@ -84,7 +86,9 @@ def test_bad_setting_returns_two(commands, env, capsys) -> None:
 
 
 def test_dotenv_in_working_directory_is_loaded(commands, env, tmp_path) -> None:
-    (tmp_path / ".env").write_text("QDRANT_COLLECTION=from-dotenv\nSLACK_BOT_TOKEN=xoxb-dotenv\n")
+    (tmp_path / ".env").write_text(
+        "QDRANT_COLLECTION=from-dotenv\nSLACK_BOT_TOKEN=xoxb-dotenv\n"
+    )
     # Register both so monkeypatch removes whatever load_dotenv sets.
     env.setenv("QDRANT_COLLECTION", "placeholder")
     env.delenv("QDRANT_COLLECTION")
@@ -117,7 +121,12 @@ def test_configure_logging(monkeypatch) -> None:
 
 @pytest.mark.parametrize(
     "argv,passed",
-    [([], []), (["--check"], ["--check"]), (["run"], []), (["run", "--check"], ["--check"])],
+    [
+        ([], []),
+        (["--check"], ["--check"]),
+        (["run"], []),
+        (["run", "--check"], ["--check"]),
+    ],
 )
 def test_run_dispatches_to_indexer(commands, argv, passed) -> None:
     commands.indexer.return_value = 7

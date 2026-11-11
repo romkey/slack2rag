@@ -14,7 +14,14 @@ from slack2rag import vector_store
 from slack2rag.processor import Document
 from slack2rag.vector_store import VectorStore
 
-KEYWORD_FIELDS = ("channel_id", "channel_name", "date", "user_id", "doc_type", "source_system")
+KEYWORD_FIELDS = (
+    "channel_id",
+    "channel_name",
+    "date",
+    "user_id",
+    "doc_type",
+    "source_system",
+)
 
 
 def _collections(*names: str) -> SimpleNamespace:
@@ -114,8 +121,9 @@ def test_payload_index_errors_are_swallowed(qc) -> None:
 
 def test_existing_collection_matching_dimension(qc) -> None:
     qc.get_collections.return_value = _collections("other", "slack")
-    qc.get_collection.return_value = _collection_info(qmodels.VectorParams(
-        size=4, distance=qmodels.Distance.COSINE))
+    qc.get_collection.return_value = _collection_info(
+        qmodels.VectorParams(size=4, distance=qmodels.Distance.COSINE)
+    )
     VectorStore("u", "slack", 4)
     qc.create_collection.assert_not_called()
     qc.get_collection.assert_called_once_with("slack")
@@ -184,7 +192,9 @@ def test_upsert_hybrid_points_include_sparse(qc) -> None:
     )
     (point,) = qc.upsert.call_args.kwargs["points"]
     assert point.vector["dense"] == [1.0, 0.0, 0.0, 0.0]
-    assert point.vector["sparse"] == qmodels.SparseVector(indices=[3, 7], values=[0.5, 0.25])
+    assert point.vector["sparse"] == qmodels.SparseVector(
+        indices=[3, 7], values=[0.5, 0.25]
+    )
 
 
 def test_upsert_hybrid_without_sparse_falls_back_to_plain_vector(qc) -> None:
@@ -196,7 +206,9 @@ def test_upsert_hybrid_without_sparse_falls_back_to_plain_vector(qc) -> None:
 
 def test_upsert_simple_ignores_sparse(qc) -> None:
     store = _store(qc)
-    store.upsert([_doc(1)], [[1.0] * 4], sparse_vectors=[{"indices": [1], "values": [1.0]}])
+    store.upsert(
+        [_doc(1)], [[1.0] * 4], sparse_vectors=[{"indices": [1], "values": [1.0]}]
+    )
     (point,) = qc.upsert.call_args.kwargs["points"]
     assert point.vector == [1.0] * 4
 
@@ -350,8 +362,12 @@ def test_hybrid_search_uses_rrf_prefetch(qc) -> None:
 def test_hybrid_search_prefetch_limit_scales_and_threshold(qc) -> None:
     store = _store(qc, hybrid=True)
     qc.query_points.return_value = _hits()
-    store.search([0.1] * 4, limit=10, score_threshold=0.01,
-                 sparse_vector={"indices": [], "values": []})
+    store.search(
+        [0.1] * 4,
+        limit=10,
+        score_threshold=0.01,
+        sparse_vector={"indices": [], "values": []},
+    )
     kwargs = qc.query_points.call_args.kwargs
     assert kwargs["prefetch"][0].limit == 30
     assert kwargs["prefetch"][0].filter is None

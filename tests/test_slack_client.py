@@ -305,8 +305,14 @@ def test_prefetch_users_paginates_and_picks_names(client, web) -> None:
         _page(
             "members",
             [
-                _user("U1", name="alice", profile={"display_name": "Ali", "real_name": "Alice A"}),
-                _user("U2", name="bob", profile={"display_name": "", "real_name": "Bob B"}),
+                _user(
+                    "U1",
+                    name="alice",
+                    profile={"display_name": "Ali", "real_name": "Alice A"},
+                ),
+                _user(
+                    "U2", name="bob", profile={"display_name": "", "real_name": "Bob B"}
+                ),
             ],
             "cur",
         ),
@@ -437,12 +443,18 @@ def test_get_attachments_fallbacks() -> None:
 
 
 def test_get_channel_topic_prefers_topic_then_purpose() -> None:
-    assert SlackClient.get_channel_topic(
-        {"topic": {"value": "T"}, "purpose": {"value": "P"}}
-    ) == "T"
-    assert SlackClient.get_channel_topic(
-        {"topic": {"value": ""}, "purpose": {"value": "P"}}
-    ) == "P"
+    assert (
+        SlackClient.get_channel_topic(
+            {"topic": {"value": "T"}, "purpose": {"value": "P"}}
+        )
+        == "T"
+    )
+    assert (
+        SlackClient.get_channel_topic(
+            {"topic": {"value": ""}, "purpose": {"value": "P"}}
+        )
+        == "P"
+    )
     assert SlackClient.get_channel_topic({}) == ""
 
 

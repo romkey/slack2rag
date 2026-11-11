@@ -7,7 +7,7 @@ Each row stores the full Slack API object as JSONB so no metadata is lost.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import psycopg
 from alembic import command as alembic_command
@@ -63,7 +63,7 @@ class PgStore:
         self._conninfo = conninfo
 
     @staticmethod
-    def from_url(url: str) -> Optional["PgStore"]:
+    def from_url(url: str) -> PgStore | None:
         if not (url or "").strip():
             return None
         return PgStore(url.strip())
