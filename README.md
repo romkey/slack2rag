@@ -1,5 +1,10 @@
 # slack2rag
 
+[![CI](https://github.com/romkey/slack2rag/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/romkey/slack2rag/actions/workflows/ci.yml)
+[![Lint](https://github.com/romkey/slack2rag/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/romkey/slack2rag/actions/workflows/lint.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.15](https://img.shields.io/badge/python-3.15-blue.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+
 Indexes Slack public-channel messages into a [Qdrant](https://qdrant.tech/) vector database for use with Retrieval-Augmented Generation (RAG).  Embeddings (and the optional message-quality evaluator) are generated through any **OpenAI-compatible** inference endpoint — OpenAI itself, [Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio, etc.
 
 ```
