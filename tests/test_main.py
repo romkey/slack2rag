@@ -752,6 +752,16 @@ def test_main_check_flag_exit_codes(app: SimpleNamespace, ok: bool, code: int) -
     app.slack_cls.assert_not_called()
 
 
+def test_main_warns_when_openai_has_no_key(
+    app: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    app.env.delenv("LLM_BASE_URL", raising=False)
+    app.env.delenv("LLM_API_KEY", raising=False)
+    with caplog.at_level(logging.WARNING, logger="slack2rag"):
+        main.main(["--check"])
+    assert "LLM_API_KEY is not set" in caplog.text
+
+
 def test_main_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     with pytest.raises(ConfigError, match="SLACK_BOT_TOKEN"):

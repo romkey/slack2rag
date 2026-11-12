@@ -26,14 +26,14 @@ the app with a message naming the variable.
 | `QDRANT_URL` | `http://qdrant:6333` | Qdrant REST endpoint. The compose files set it |
 | `QDRANT_COLLECTION` | `slack_messages` | Collection name |
 
-## Embeddings (OpenAI-compatible endpoint)
+## Embeddings (OpenAI, or any OpenAI-compatible endpoint)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | Base URL; `/embeddings` and `/chat/completions` are appended. The compose files ignore it; see `CONTAINER_LLM_BASE_URL` |
-| `CONTAINER_LLM_BASE_URL` | `http://ollama:11434/v1` | Compose files only: the `LLM_BASE_URL` they give the app container. Its own name, so a host-only `LLM_BASE_URL` in `.env` doesn't leak into the container |
-| `LLM_API_KEY` | *(empty)* | Sent as a Bearer token. Required by OpenAI; most local servers ignore it |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name on that server. Changing it needs a fresh collection |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL; `/embeddings` and `/chat/completions` are appended. The compose files ignore it; see `CONTAINER_LLM_BASE_URL` |
+| `CONTAINER_LLM_BASE_URL` | `https://api.openai.com/v1` | Compose files only: the `LLM_BASE_URL` they give the app container. Its own name, so a host-only `LLM_BASE_URL` in `.env` doesn't leak into the container. `http://ollama:11434/v1` for the bundled Ollama (`COMPOSE_PROFILES=ollama`) |
+| `LLM_API_KEY` | *(empty)* | Optional; sent as a Bearer token when set. Required by OpenAI (a warning is logged at startup if it is missing); most local servers ignore it |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model name on that server. Changing it needs a fresh collection |
 | `EMBEDDING_PREFIX` | *(empty)* | Text put before every embedding input, for models that need a task prefix (`search_document: `) |
 | `EMBEDDING_CONTEXT_LENGTH` | `8192` | The model's context window in tokens, ≥ 0. Longer texts are truncated at a word boundary; 0 disables truncation |
 | `BATCH_SIZE` | `50` | Messages embedded per request, ≥ 1 |

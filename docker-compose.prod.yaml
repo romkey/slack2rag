@@ -1,14 +1,18 @@
-# Production: runs the released image from ghcr.io with Qdrant and Ollama.
-# Configure it in .env next to this file (see .env.example and
-# docs/configuration.md).
+# Production: runs the released image from ghcr.io with Qdrant. Embeddings
+# come from OpenAI by default (set LLM_API_KEY). Configure it in .env next
+# to this file (see .env.example and docs/configuration.md).
 #
 #   docker compose -f docker-compose.prod.yaml up -d
-#   docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text
 #   APP_VERSION=1.2.3 docker compose -f docker-compose.prod.yaml up -d   # pin a release
 #   docker compose -f docker-compose.prod.yaml build   # build the image locally instead
 #
 # Search the index:
 #   docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy process"
+#
+# Optional local Ollama instead of OpenAI: in .env set
+# CONTAINER_LLM_BASE_URL=http://ollama:11434/v1, EMBEDDING_MODEL=nomic-embed-text
+# and COMPOSE_PROFILES=ollama (comma-separate it with other profiles), then
+#   docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text
 #
 # Optional PostgreSQL copy of the raw Slack data: set POSTGRES_* and
 # DATABASE_URL (host db) in .env, then add --profile postgres to every
@@ -29,16 +33,17 @@ services:
         required: false
     environment:
       QDRANT_URL: http://qdrant:6333
-      # The bundled Ollama, unless .env sets CONTAINER_LLM_BASE_URL. A
-      # separate name, so a host-only LLM_BASE_URL (localhost) in .env
-      # can't point the container at itself.
-      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-http://ollama:11434/v1}
+      # OpenAI, unless .env sets CONTAINER_LLM_BASE_URL. A separate name,
+      # so a host-only LLM_BASE_URL (localhost) in .env can't point the
+      # container at itself.
+      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-https://api.openai.com/v1}
       STATE_FILE: /data/state.json
     depends_on:
       qdrant:
         condition: service_healthy
       ollama:
         condition: service_started
+        required: false
       migrate:
         condition: service_completed_successfully
         required: false
@@ -69,12 +74,11 @@ services:
       timeout: 5s
       retries: 5
 
-  # Embeddings (and optionally the evaluator's chat model) via Ollama's
-  # OpenAI-compatible /v1 API. To use OpenAI or another provider instead,
-  # remove this service and set CONTAINER_LLM_BASE_URL and LLM_API_KEY
-  # in .env.
+  # Optional local embeddings (and evaluator chat model) via Ollama's
+  # OpenAI-compatible /v1 API, instead of OpenAI. See the top of this file.
   ollama:
     image: ollama/ollama:0.40.16
+    profiles: [ollama]
     restart: unless-stopped
     volumes:
       - ollama_data:/root/.ollama

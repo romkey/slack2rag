@@ -20,7 +20,7 @@
 - `src/slack2rag/query.py`: `slack2rag query` search output.
 - `tests/`: pytest; one file per module, `*_extra.py`/`*_unit.py` for more cases. `test_pg_store.py` needs `TEST_DATABASE_URL`.
 - `Dockerfile`: `dev` and `production` stages; `/data` and `/results` writable by uid 10001.
-- `docker-compose.yaml` (dev: app, qdrant, ollama, db), `.test` (test, db), `.lint`, `.prod` (app, qdrant, ollama; `postgres` profile adds migrate, db).
+- `docker-compose.yaml` (dev: app, qdrant, db; `ollama` profile adds ollama), `.test` (test, db), `.lint`, `.prod` (app, qdrant; `ollama` profile adds ollama, `postgres` profile adds migrate, db).
 
 ## Conventions
 

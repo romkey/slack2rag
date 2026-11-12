@@ -9,6 +9,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+OPENAI_HOST = "api.openai.com"
+
 
 class ConfigError(ValueError):
     """An environment variable is missing or set to something unusable."""
@@ -70,14 +72,12 @@ class Config:
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
     slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
-    # OpenAI-compatible inference endpoint (works with OpenAI, Ollama's /v1
-    # compatibility layer, llama.cpp server, vLLM, LM Studio, etc.).
-    llm_base_url: str = "http://localhost:11434/v1"
-    llm_api_key: str = (
-        ""  # sent as Bearer token; some servers require any non-empty value
-    )
+    # Inference endpoint: OpenAI by default. Any OpenAI-compatible server
+    # (Ollama's /v1 layer, llama.cpp server, vLLM, LM Studio...) also works.
+    llm_base_url: str = f"https://{OPENAI_HOST}/v1"
+    llm_api_key: str = ""  # optional Bearer token; OpenAI requires one
 
-    embedding_model: str = "nomic-embed-text"
+    embedding_model: str = "text-embedding-3-small"
     embedding_prefix: str = ""  # optional prefix prepended to each embedding input
     embedding_context_length: int = (
         8192  # model context window in tokens; 0 = no truncation
@@ -130,6 +130,29 @@ class Config:
     @property
     def effective_eval_api_key(self) -> str:
         return self.eval_api_key or self.llm_api_key
+
+    def missing_api_key_warnings(self) -> list[str]:
+        """Warnings for OpenAI endpoints configured without an API key.
+
+        The key stays optional so local servers work without one, but
+        OpenAI itself rejects unauthenticated requests.
+        """
+        warnings = []
+        if OPENAI_HOST in self.llm_base_url and not self.llm_api_key:
+            warnings.append(
+                f"LLM_BASE_URL is {self.llm_base_url} but LLM_API_KEY is not "
+                "set; OpenAI will refuse the embedding requests"
+            )
+        if (
+            self.eval_model
+            and OPENAI_HOST in self.effective_eval_base_url
+            and not self.effective_eval_api_key
+        ):
+            warnings.append(
+                f"The evaluator uses {self.effective_eval_base_url} but neither "
+                "EVAL_API_KEY nor LLM_API_KEY is set; OpenAI will refuse its requests"
+            )
+        return warnings
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Config:
