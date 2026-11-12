@@ -29,8 +29,10 @@ services:
         required: false
     environment:
       QDRANT_URL: http://qdrant:6333
-      # The bundled Ollama, unless .env sets LLM_BASE_URL to another server.
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      # The bundled Ollama, unless .env sets CONTAINER_LLM_BASE_URL. A
+      # separate name, so a host-only LLM_BASE_URL (localhost) in .env
+      # can't point the container at itself.
+      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-http://ollama:11434/v1}
       STATE_FILE: /data/state.json
     depends_on:
       qdrant:
@@ -69,7 +71,8 @@ services:
 
   # Embeddings (and optionally the evaluator's chat model) via Ollama's
   # OpenAI-compatible /v1 API. To use OpenAI or another provider instead,
-  # remove this service and set LLM_BASE_URL / LLM_API_KEY in .env.
+  # remove this service and set CONTAINER_LLM_BASE_URL and LLM_API_KEY
+  # in .env.
   ollama:
     image: ollama/ollama:0.40.16
     restart: unless-stopped

@@ -212,8 +212,8 @@ docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy 
 That runs the latest release from `ghcr.io/romkey/slack2rag` with Qdrant
 and Ollama; set `APP_VERSION=X.Y.Z` to pin one. To use an Ollama already
 running on the host, remove the `ollama` service and set
-`LLM_BASE_URL=http://host.docker.internal:11434/v1`; for OpenAI, set
-`LLM_BASE_URL=https://api.openai.com/v1` and `LLM_API_KEY`.
+`CONTAINER_LLM_BASE_URL=http://host.docker.internal:11434/v1`; for OpenAI,
+set `CONTAINER_LLM_BASE_URL=https://api.openai.com/v1` and `LLM_API_KEY`.
 
 For the optional PostgreSQL store, set `POSTGRES_USER`, `POSTGRES_PASSWORD`,
 `POSTGRES_DB` and `DATABASE_URL` (host `db`) in `.env` and

@@ -30,7 +30,8 @@ the app with a message naming the variable.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | Base URL; `/embeddings` and `/chat/completions` are appended. Unset, the compose files use their bundled Ollama, `http://ollama:11434/v1` |
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | Base URL; `/embeddings` and `/chat/completions` are appended. The compose files ignore it; see `CONTAINER_LLM_BASE_URL` |
+| `CONTAINER_LLM_BASE_URL` | `http://ollama:11434/v1` | Compose files only: the `LLM_BASE_URL` they give the app container. Its own name, so a host-only `LLM_BASE_URL` in `.env` doesn't leak into the container |
 | `LLM_API_KEY` | *(empty)* | Sent as a Bearer token. Required by OpenAI; most local servers ignore it |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name on that server. Changing it needs a fresh collection |
 | `EMBEDDING_PREFIX` | *(empty)* | Text put before every embedding input, for models that need a task prefix (`search_document: `) |
