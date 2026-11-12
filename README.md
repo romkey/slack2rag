@@ -11,7 +11,7 @@ Generation (RAG) chatbot or any other app can search your team's
 conversations by meaning. It keeps the index current with incremental syncs,
 groups threads, and stores rich metadata (channel, author, date, reactions,
 permalinks). Embeddings, and an optional message-quality evaluator, come from
-any **OpenAI-compatible** inference endpoint: OpenAI itself,
+the **OpenAI API** by default, or from any OpenAI-compatible endpoint:
 [Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio.
 
 > **AI disclosure:** This project was written by AI under human oversight,
@@ -20,7 +20,7 @@ any **OpenAI-compatible** inference endpoint: OpenAI itself,
 ```
 Slack API  →  slack2rag  →  Qdrant  ←  any app, via Qdrant's REST API
                   ↕
-       OpenAI-compatible LLM
+   OpenAI (or compatible) API
 ```
 
 ## What's here
@@ -113,16 +113,19 @@ Qdrant serves a REST API on port **6333** (gRPC on 6334). Embed the query
 with the same model slack2rag uses, then search:
 
 ```python
-import json, urllib.request
+import json, os, urllib.request
 from qdrant_client import QdrantClient
 
 payload = json.dumps(
-    {"model": "nomic-embed-text", "input": ["how do I set up SSO?"]}
+    {"model": "text-embedding-3-small", "input": ["how do I set up SSO?"]}
 ).encode()
 req = urllib.request.Request(
-    "http://localhost:11434/v1/embeddings",
+    "https://api.openai.com/v1/embeddings",
     data=payload,
-    headers={"Content-Type": "application/json"},
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
+    },
 )
 with urllib.request.urlopen(req) as resp:
     vector = json.loads(resp.read())["data"][0]["embedding"]
@@ -177,11 +180,11 @@ first (`ollama pull <model>`). Set `EMBEDDING_CONTEXT_LENGTH` to match.
 
 | Model | Dims | Notes |
 |---|---|---|
-| `nomic-embed-text` (default) | 768 | Strong general-purpose Ollama model |
+| `text-embedding-3-small` (default) | 1536 | OpenAI, fast and cheap |
+| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
+| `nomic-embed-text` | 768 | Strong general-purpose Ollama model |
 | `mxbai-embed-large` | 1024 | High quality (Ollama) |
 | `all-minilm` | 384 | Lightweight (Ollama) |
-| `text-embedding-3-small` | 1536 | OpenAI, fast and cheap |
-| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
 
 ## Running it
 
@@ -202,18 +205,27 @@ Requires Docker. Configuration comes from environment variables, kept in
 `.env` (see [docs/configuration.md](docs/configuration.md)):
 
 ```bash
-cp .env.example .env   # then set SLACK_BOT_TOKEN
+cp .env.example .env   # then set SLACK_BOT_TOKEN and LLM_API_KEY
 docker compose -f docker-compose.prod.yaml up -d
-docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text   # first time
 docker compose -f docker-compose.prod.yaml run --rm app slack2rag --check
 docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy process"
 ```
 
-That runs the latest release from `ghcr.io/romkey/slack2rag` with Qdrant
-and Ollama; set `APP_VERSION=X.Y.Z` to pin one. To use an Ollama already
-running on the host, remove the `ollama` service and set
-`CONTAINER_LLM_BASE_URL=http://host.docker.internal:11434/v1`; for OpenAI,
-set `CONTAINER_LLM_BASE_URL=https://api.openai.com/v1` and `LLM_API_KEY`.
+That runs the latest release from `ghcr.io/romkey/slack2rag` with Qdrant,
+using OpenAI for embeddings; set `APP_VERSION=X.Y.Z` to pin a release.
+
+To run models locally instead, set these in `.env`:
+
+```bash
+COMPOSE_PROFILES=ollama
+CONTAINER_LLM_BASE_URL=http://ollama:11434/v1
+EMBEDDING_MODEL=nomic-embed-text
+```
+
+then `docker compose -f docker-compose.prod.yaml up -d` and, the first time,
+`docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text`.
+For an Ollama already running on the host, skip the profile and set
+`CONTAINER_LLM_BASE_URL=http://host.docker.internal:11434/v1`.
 
 For the optional PostgreSQL store, set `POSTGRES_USER`, `POSTGRES_PASSWORD`,
 `POSTGRES_DB` and `DATABASE_URL` (host `db`) in `.env` and

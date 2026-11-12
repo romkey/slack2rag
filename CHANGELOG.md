@@ -39,9 +39,19 @@ before this one have no changelog entries.
 - `LLM_BASE_URL` and `EVAL_BASE_URL` must be http:// or https:// URLs;
   anything else is refused before a request is made.
 
+- Inference defaults to OpenAI: `LLM_BASE_URL` (and the compose files'
+  `CONTAINER_LLM_BASE_URL`) default to `https://api.openai.com/v1` and
+  `EMBEDDING_MODEL` to `text-embedding-3-small`. `LLM_API_KEY` stays
+  optional. The bundled Ollama service is now behind the `ollama` compose
+  profile. To keep an existing Ollama-built index, set
+  `COMPOSE_PROFILES=ollama`, `CONTAINER_LLM_BASE_URL=http://ollama:11434/v1`
+  and `EMBEDDING_MODEL=nomic-embed-text` in `.env`; otherwise delete the
+  Qdrant collection and re-index (the vector size changes).
+
 ### Added
 
 - `LOG_LEVEL` setting.
+- A startup warning when an OpenAI endpoint has no API key.
 - `docker stop` (SIGTERM) ends the sync loop cleanly between cycles.
 - Tests for every module (coverage 12% → 99%), including PostgreSQL tests
   against a real database; strict-xfail tests record known bugs.

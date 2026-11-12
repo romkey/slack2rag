@@ -229,3 +229,49 @@ def test_eval_test_false_strings_disable(
 ) -> None:
     clean_env.setenv("EVAL_TEST", value)
     assert Config.from_env().eval_test is False
+
+
+def test_llm_defaults_to_openai(clean_env: pytest.MonkeyPatch) -> None:
+    cfg = Config.from_env()
+    assert cfg.llm_base_url == "https://api.openai.com/v1"
+    assert cfg.embedding_model == "text-embedding-3-small"
+    assert cfg.llm_api_key == ""
+
+
+def _openai_cfg(
+    llm_base_url: str = Config.llm_base_url,
+    llm_api_key: str = "",
+    eval_model: str = "",
+    eval_base_url: str = "",
+) -> Config:
+    return Config(
+        slack_bot_token="xoxb-test",  # noqa: S106 dummy test token
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        eval_model=eval_model,
+        eval_base_url=eval_base_url,
+    )
+
+
+def test_missing_api_key_warns_for_openai() -> None:
+    cfg = _openai_cfg()
+    assert len(cfg.missing_api_key_warnings()) == 1
+    with_eval = _openai_cfg(eval_model="gpt-4o-mini")
+    assert len(with_eval.missing_api_key_warnings()) == 2
+
+
+def test_no_api_key_warning_when_key_set_or_local() -> None:
+    keyed = _openai_cfg(llm_api_key="sk-x", eval_model="m")
+    assert keyed.missing_api_key_warnings() == []
+    local = _openai_cfg(llm_base_url="http://ollama:11434/v1", eval_model="m")
+    assert local.missing_api_key_warnings() == []
+
+
+def test_eval_key_warning_follows_separate_eval_endpoint() -> None:
+    cfg = _openai_cfg(
+        llm_base_url="http://ollama:11434/v1",
+        eval_model="gpt-4o-mini",
+        eval_base_url="https://api.openai.com/v1",
+    )
+    (warning,) = cfg.missing_api_key_warnings()
+    assert "evaluator" in warning

@@ -493,6 +493,8 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
     from . import __version__
 
     logger.info("Starting slack2rag v%s", __version__)
+    for warning in cfg.missing_api_key_warnings():
+        logger.warning("%s", warning)
 
     if args.check:
         if _check_llm(cfg):
