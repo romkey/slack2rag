@@ -131,7 +131,8 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
             model=cfg.embedding_model,
             context_length=cfg.embedding_context_length,
             api_key=cfg.llm_api_key,
-            input_prefix=cfg.embedding_prefix,
+            query_prefix=cfg.embedding_query_prefix,
+            document_prefix=cfg.embedding_document_prefix,
         )
     except EmbeddingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -151,7 +152,7 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         print("  (hybrid: dense + sparse)")
     print()
 
-    vector = embedder.embed([query_text])[0]
+    vector = embedder.embed([query_text], kind="query")[0]
     sparse_vector = sparse_encoder.encode([query_text])[0] if sparse_encoder else None
 
     results = store.search(

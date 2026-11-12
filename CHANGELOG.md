@@ -38,20 +38,30 @@ before this one have no changelog entries.
   message naming the variable, instead of a traceback or being ignored.
 - `LLM_BASE_URL` and `EVAL_BASE_URL` must be http:// or https:// URLs;
   anything else is refused before a request is made.
-
-- Inference defaults to OpenAI: `LLM_BASE_URL` (and the compose files'
-  `CONTAINER_LLM_BASE_URL`) default to `https://api.openai.com/v1` and
-  `EMBEDDING_MODEL` to `text-embedding-3-small`. `LLM_API_KEY` stays
-  optional. The bundled Ollama service is now behind the `ollama` compose
-  profile. To keep an existing Ollama-built index, set
-  `COMPOSE_PROFILES=ollama`, `CONTAINER_LLM_BASE_URL=http://ollama:11434/v1`
-  and `EMBEDDING_MODEL=nomic-embed-text` in `.env`; otherwise delete the
-  Qdrant collection and re-index (the vector size changes).
+- Embeddings default to ModernBERT (`nomic-ai/modernbert-embed-base`, 768
+  dimensions) served locally by Hugging Face Text Embeddings Inference over
+  the OpenAI API: the compose files run it as the `embeddings` service, and
+  `LLM_BASE_URL` defaults to `http://localhost:8080/v1`. The bundled Ollama
+  service is now behind the `ollama` compose profile. `LLM_API_KEY` stays
+  optional. To keep an existing Ollama-built index, set
+  `COMPOSE_PROFILES=ollama`, `CONTAINER_LLM_BASE_URL=http://ollama:11434/v1`,
+  `EMBEDDING_MODEL=nomic-embed-text` and the two prefixes below in `.env`;
+  otherwise delete the Qdrant collection and re-index.
+- `EMBEDDING_CONTEXT_LENGTH` now defaults to 2048 (was 8192). The bundled
+  embeddings service has its own limit, `TEI_MAX_BATCH_TOKENS` (default
+  2048), so an 8192 left in `.env` doesn't exhaust its memory.
+- `EMBEDDING_PREFIX` is replaced by `EMBEDDING_QUERY_PREFIX` and
+  `EMBEDDING_DOCUMENT_PREFIX` (defaults `search_query: ` and
+  `search_document: `, ModernBERT's prompts). Setting the old variable stops
+  the app with a message.
 
 ### Added
 
 - `LOG_LEVEL` setting.
 - A startup warning when an OpenAI endpoint has no API key.
+- Separate query and document prefixes for embedding models trained with
+  prompts: indexed messages get the document prefix, `slack2rag query` the
+  query prefix, and the prefix counts toward `EMBEDDING_CONTEXT_LENGTH`.
 - `docker stop` (SIGTERM) ends the sync loop cleanly between cycles.
 - Tests for every module (coverage 12% → 99%), including PostgreSQL tests
   against a real database; strict-xfail tests record known bugs.

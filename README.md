@@ -10,9 +10,13 @@ slack2rag indexes the messages in your Slack channels into a
 Generation (RAG) chatbot or any other app can search your team's
 conversations by meaning. It keeps the index current with incremental syncs,
 groups threads, and stores rich metadata (channel, author, date, reactions,
-permalinks). Embeddings, and an optional message-quality evaluator, come from
-the **OpenAI API** by default, or from any OpenAI-compatible endpoint:
-[Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio.
+permalinks). Embeddings come from any server that speaks the **OpenAI API**;
+by default a local
+[Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
+server running [ModernBERT](https://huggingface.co/nomic-ai/modernbert-embed-base),
+with OpenAI, [Ollama](https://ollama.com/), vLLM or LM Studio as
+alternatives. The optional message-quality evaluator uses the same API's
+chat completions.
 
 > **AI disclosure:** This project was written by AI under human oversight,
 > following [these rules](https://github.com/romkey/python-ai-rules/blob/main/RULES.md).
@@ -20,7 +24,7 @@ the **OpenAI API** by default, or from any OpenAI-compatible endpoint:
 ```
 Slack API  →  slack2rag  →  Qdrant  ←  any app, via Qdrant's REST API
                   ↕
-   OpenAI (or compatible) API
+  OpenAI API (local TEI by default)
 ```
 
 ## What's here
@@ -110,22 +114,29 @@ compose file keeps them in the `slack2rag_results` volume; read them with
 ### Querying from another application
 
 Qdrant serves a REST API on port **6333** (gRPC on 6334). Embed the query
-with the same model slack2rag uses, then search:
+with the same model slack2rag uses, then search.
+
+**Add the query prefix yourself.** slack2rag stores every message with
+`EMBEDDING_DOCUMENT_PREFIX` in front, and models trained with prompts only
+match well when the query carries the matching `EMBEDDING_QUERY_PREFIX`
+(`search_query: ` for the default ModernBERT; nothing for OpenAI models):
 
 ```python
-import json, os, urllib.request
+import json, urllib.request
 from qdrant_client import QdrantClient
 
+QUERY_PREFIX = "search_query: "  # same as slack2rag's EMBEDDING_QUERY_PREFIX
+
 payload = json.dumps(
-    {"model": "text-embedding-3-small", "input": ["how do I set up SSO?"]}
+    {
+        "model": "nomic-ai/modernbert-embed-base",
+        "input": [QUERY_PREFIX + "how do I set up SSO?"],
+    }
 ).encode()
 req = urllib.request.Request(
-    "https://api.openai.com/v1/embeddings",
+    "http://localhost:8080/v1/embeddings",  # the dev compose file's embeddings service
     data=payload,
-    headers={
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.environ['LLM_API_KEY']}",
-    },
+    headers={"Content-Type": "application/json"},
 )
 with urllib.request.urlopen(req) as resp:
     vector = json.loads(resp.read())["data"][0]["embedding"]
@@ -175,16 +186,25 @@ Indexed fields: `channel_id`, `channel_name`, `date`, `user_id` (keyword),
 
 ### Choosing an embedding model
 
-Any embedding model your inference server offers works; with Ollama, pull it
-first (`ollama pull <model>`). Set `EMBEDDING_CONTEXT_LENGTH` to match.
+Any embedding model your server offers works. The bundled TEI service
+serves whatever Hugging Face model `EMBEDDING_MODEL` names. Set
+`EMBEDDING_CONTEXT_LENGTH` and both prefixes to match the model: many are
+trained with one prompt for queries and another for documents, and retrieval
+suffers without them. `.env.example` has the full table.
 
-| Model | Dims | Notes |
-|---|---|---|
-| `text-embedding-3-small` (default) | 1536 | OpenAI, fast and cheap |
-| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
-| `nomic-embed-text` | 768 | Strong general-purpose Ollama model |
-| `mxbai-embed-large` | 1024 | High quality (Ollama) |
-| `all-minilm` | 384 | Lightweight (Ollama) |
+| Model | Dims | Query prefix | Document prefix |
+|---|---|---|---|
+| `nomic-ai/modernbert-embed-base` (default) | 768 | `search_query: ` | `search_document: ` |
+| `Alibaba-NLP/gte-modernbert-base` | 768 | — | — |
+| `nomic-embed-text` (Ollama) | 768 | `search_query: ` | `search_document: ` |
+| e5 family (`intfloat/e5-*`) | 384–1024 | `query: ` | `passage: ` |
+| `mxbai-embed-large` | 1024 | `Represent this sentence for searching relevant passages: ` | — |
+| Qwen3-Embedding | 1024+ | an instruction line | — |
+| OpenAI `text-embedding-3-*` | 1536 / 3072 | — | — |
+
+Changing the model or the document prefix changes every stored vector, so
+delete the Qdrant collection and re-index. Changing the query prefix only
+affects searches.
 
 ## Running it
 
@@ -205,27 +225,28 @@ Requires Docker. Configuration comes from environment variables, kept in
 `.env` (see [docs/configuration.md](docs/configuration.md)):
 
 ```bash
-cp .env.example .env   # then set SLACK_BOT_TOKEN and LLM_API_KEY
+cp .env.example .env   # then set SLACK_BOT_TOKEN
 docker compose -f docker-compose.prod.yaml up -d
 docker compose -f docker-compose.prod.yaml run --rm app slack2rag --check
 docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy process"
 ```
 
-That runs the latest release from `ghcr.io/romkey/slack2rag` with Qdrant,
-using OpenAI for embeddings; set `APP_VERSION=X.Y.Z` to pin a release.
+That runs the latest release from `ghcr.io/romkey/slack2rag` with Qdrant
+and a local `embeddings` service (Text Embeddings Inference serving
+ModernBERT, downloaded on first start); set `APP_VERSION=X.Y.Z` to pin a
+release. On ARM hosts such as Apple silicon, also set
+`TEI_IMAGE_TAG=cpu-arm64-1.9.4`.
 
-To run models locally instead, set these in `.env`:
+To use OpenAI instead, set these in `.env` and add `--scale embeddings=0`
+to `up`:
 
 ```bash
-COMPOSE_PROFILES=ollama
-CONTAINER_LLM_BASE_URL=http://ollama:11434/v1
-EMBEDDING_MODEL=nomic-embed-text
+CONTAINER_LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-...
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_QUERY_PREFIX=""
+EMBEDDING_DOCUMENT_PREFIX=""
 ```
-
-then `docker compose -f docker-compose.prod.yaml up -d` and, the first time,
-`docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text`.
-For an Ollama already running on the host, skip the profile and set
-`CONTAINER_LLM_BASE_URL=http://host.docker.internal:11434/v1`.
 
 For the optional PostgreSQL store, set `POSTGRES_USER`, `POSTGRES_PASSWORD`,
 `POSTGRES_DB` and `DATABASE_URL` (host `db`) in `.env` and
@@ -255,7 +276,7 @@ You also need Qdrant and an embedding server it can reach.
 With Docker, nothing else to install:
 
 ```bash
-docker compose up --build                                  # app, Qdrant, Ollama, PostgreSQL, from the working tree
+docker compose up --build                                  # app, Qdrant, embeddings, PostgreSQL, from the working tree
 docker compose -f docker-compose.test.yaml run --rm test   # tests with coverage, against a real PostgreSQL
 docker compose -f docker-compose.lint.yaml run --rm lint   # every lint check, as CI runs them
 ```

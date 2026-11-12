@@ -225,7 +225,7 @@ def _flush(
     sparse_encoder: SparseEncoder | None,
 ) -> int:
     texts = [d.text for d in docs]
-    vectors = embedder.embed(texts)
+    vectors = embedder.embed(texts, kind="document")
     sparse_vectors = sparse_encoder.encode(texts) if sparse_encoder else None
     store.upsert(docs, vectors, sparse_vectors=sparse_vectors)
     return len(docs)
@@ -423,9 +423,10 @@ def _check_llm(cfg: Config) -> bool:
             model=cfg.embedding_model,
             context_length=cfg.embedding_context_length,
             api_key=cfg.llm_api_key,
-            input_prefix=cfg.embedding_prefix,
+            query_prefix=cfg.embedding_query_prefix,
+            document_prefix=cfg.embedding_document_prefix,
         )
-        vector = embedder.embed(["slack2rag connectivity check"])[0]
+        vector = embedder.embed(["slack2rag connectivity check"], kind="query")[0]
         logger.info(
             "  ✓ Embedding model OK (dimension=%d, sample[0]=%.4f)",
             len(vector),
@@ -507,8 +508,14 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
     logger.info("  LLM:            %s", cfg.llm_base_url)
     logger.info("  Embedding model: %s", cfg.embedding_model)
     logger.info(
-        "  Embed prefix:   %s",
-        repr(cfg.embedding_prefix) if cfg.embedding_prefix else "none",
+        "  Query prefix:   %s",
+        repr(cfg.embedding_query_prefix) if cfg.embedding_query_prefix else "none",
+    )
+    logger.info(
+        "  Doc prefix:     %s",
+        repr(cfg.embedding_document_prefix)
+        if cfg.embedding_document_prefix
+        else "none",
     )
     logger.info("  Hybrid search:  %s", cfg.hybrid_search)
     logger.info("  Channels:       %s", cfg.channel_list or "all public")
@@ -571,7 +578,8 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
             model=cfg.embedding_model,
             context_length=cfg.embedding_context_length,
             api_key=cfg.llm_api_key,
-            input_prefix=cfg.embedding_prefix,
+            query_prefix=cfg.embedding_query_prefix,
+            document_prefix=cfg.embedding_document_prefix,
         )
     except EmbeddingError as exc:
         logger.error("Embedding setup failed:\n  %s", exc)

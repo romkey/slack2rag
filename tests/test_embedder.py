@@ -70,7 +70,7 @@ def test_embedder_uses_openai_embeddings_endpoint(
         base_url="http://localhost:11434/v1",
         model="nomic-embed-text",
         api_key="sk-test",
-        input_prefix="search_document:",
+        document_prefix="search_document:",
     )
 
     assert embedder.embed(["hello", "world"]) == [[1.0], [1.0]]
@@ -199,3 +199,71 @@ def test_embedder_raises_when_single_input_returns_null(
     embedder = Embedder(base_url="http://x/v1", model="m")
     with pytest.raises(EmbeddingError, match="invalid embedding"):
         embedder.embed(["a"])
+
+
+def test_embed_uses_query_or_document_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    inputs: list[list[str]] = []
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _JsonResponse:
+        payload = _payload(req)
+        inputs.append(payload["input"])
+        return _JsonResponse(_embedding_list([[1.0]] * len(payload["input"])))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    embedder = Embedder(
+        base_url="http://tei/v1",
+        model="nomic-ai/modernbert-embed-base",
+        query_prefix="search_query: ",
+        document_prefix="search_document: ",
+    )
+    embedder.embed(["deploy steps"], kind="document")
+    embedder.embed(["how do I deploy"], kind="query")
+    embedder.embed(["default kind"])
+
+    assert inputs == [
+        ["search_document: dimension probe"],
+        ["search_document: deploy steps"],
+        ["search_query: how do I deploy"],
+        ["search_document: default kind"],
+    ]
+
+
+def test_embed_without_prefixes_sends_text_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs: list[list[str]] = []
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _JsonResponse:
+        payload = _payload(req)
+        inputs.append(payload["input"])
+        return _JsonResponse(_embedding_list([[1.0]] * len(payload["input"])))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    embedder = Embedder(base_url="http://openai/v1", model="text-embedding-3-small")
+    embedder.embed(["q"], kind="query")
+    embedder.embed(["d"], kind="document")
+    assert inputs[1:] == [["q"], ["d"]]
+
+
+def test_prefix_counts_toward_context_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    inputs: list[list[str]] = []
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _JsonResponse:
+        payload = _payload(req)
+        inputs.append(payload["input"])
+        return _JsonResponse(_embedding_list([[1.0]] * len(payload["input"])))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    # context_length=10 tokens -> 30 characters, prefix included.
+    embedder = Embedder(
+        base_url="http://tei/v1",
+        model="m",
+        context_length=10,
+        query_prefix="search_query: ",
+    )
+    embedder.embed(["alpha beta gamma delta epsilon zeta"], kind="query")
+
+    (sent,) = inputs[-1]
+    assert sent.startswith("search_query: ")
+    assert len(sent) <= 30
+    assert sent == "search_query: alpha beta"

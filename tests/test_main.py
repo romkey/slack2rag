@@ -46,7 +46,8 @@ class _ConfigOverrides(TypedDict, total=False):
     llm_base_url: str
     llm_api_key: str
     embedding_model: str
-    embedding_prefix: str
+    embedding_query_prefix: str
+    embedding_document_prefix: str
     embedding_context_length: int
     sync_interval_minutes: int
     run_once: bool
@@ -117,8 +118,14 @@ def _slack(
 
 
 def _embedder() -> MagicMock:
+    """A fake Embedder that insists indexing embeds with the document prefix."""
+
+    def embed(texts: list[str], *, kind: str) -> list[list[float]]:
+        assert kind == "document"
+        return [[0.5]] * len(texts)
+
     emb = MagicMock()
-    emb.embed.side_effect = lambda texts: [[0.5]] * len(texts)
+    emb.embed.side_effect = embed
     emb.dimension = 1
     return emb
 
@@ -572,7 +579,8 @@ def test_check_llm_embedding_ok_no_eval(
         llm_base_url="http://llm/v1",
         llm_api_key="k",
         embedding_model="e",
-        embedding_prefix="p:",
+        embedding_query_prefix="q:",
+        embedding_document_prefix="d:",
         embedding_context_length=10,
     )
 
@@ -584,7 +592,8 @@ def test_check_llm_embedding_ok_no_eval(
         model="e",
         context_length=10,
         api_key="k",
-        input_prefix="p:",
+        query_prefix="q:",
+        document_prefix="d:",
     )
     chat.assert_not_called()
     assert "Embedding model OK (dimension=2, sample[0]=0.2500)" in caplog.text
@@ -701,6 +710,8 @@ def app(
         "HYBRID_SEARCH",
         "SYNC_INTERVAL_MINUTES",
         "EMBEDDING_PREFIX",
+        "EMBEDDING_QUERY_PREFIX",
+        "EMBEDDING_DOCUMENT_PREFIX",
         "THREAD_UPDATE_LOOKBACK_HOURS",
         "EVAL_BASE_URL",
         "EVAL_API_KEY",
@@ -755,7 +766,7 @@ def test_main_check_flag_exit_codes(app: SimpleNamespace, ok: bool, code: int) -
 def test_main_warns_when_openai_has_no_key(
     app: SimpleNamespace, caplog: pytest.LogCaptureFixture
 ) -> None:
-    app.env.delenv("LLM_BASE_URL", raising=False)
+    app.env.setenv("LLM_BASE_URL", "https://api.openai.com/v1")
     app.env.delenv("LLM_API_KEY", raising=False)
     with caplog.at_level(logging.WARNING, logger="slack2rag"):
         main.main(["--check"])

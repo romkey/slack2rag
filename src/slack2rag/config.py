@@ -72,16 +72,20 @@ class Config:
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
     slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
-    # Inference endpoint: OpenAI by default. Any OpenAI-compatible server
-    # (Ollama's /v1 layer, llama.cpp server, vLLM, LM Studio...) also works.
-    llm_base_url: str = f"https://{OPENAI_HOST}/v1"
+    # Inference endpoint: by default a local Hugging Face Text Embeddings
+    # Inference server, spoken to over the OpenAI API. Any OpenAI-compatible
+    # server (OpenAI, Ollama's /v1 layer, vLLM, llama.cpp...) also works.
+    llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = ""  # optional Bearer token; OpenAI requires one
 
-    embedding_model: str = "text-embedding-3-small"
-    embedding_prefix: str = ""  # optional prefix prepended to each embedding input
-    embedding_context_length: int = (
-        8192  # model context window in tokens; 0 = no truncation
-    )
+    # ModernBERT, trained with these task prefixes (see its model card).
+    embedding_model: str = "nomic-ai/modernbert-embed-base"
+    embedding_query_prefix: str = "search_query: "  # put before search queries
+    embedding_document_prefix: str = "search_document: "  # before indexed text
+    # Tokens per input, prefix included; 0 = no truncation. ModernBERT takes
+    # 8192, but on CPU the compose files' TEI server runs out of memory past
+    # about 2048 (attention memory grows with the square of the length).
+    embedding_context_length: int = 2048
 
     sync_interval_minutes: int = 60
     run_once: bool = False
@@ -160,6 +164,12 @@ class Config:
         if not token:
             raise ConfigError("SLACK_BOT_TOKEN is required")
 
+        if "EMBEDDING_PREFIX" in env:
+            raise ConfigError(
+                "EMBEDDING_PREFIX was replaced by EMBEDDING_QUERY_PREFIX and "
+                "EMBEDDING_DOCUMENT_PREFIX; set those instead"
+            )
+
         log_level = env.get("LOG_LEVEL", cls.log_level).strip().upper()
         if log_level not in logging.getLevelNamesMapping():
             raise ConfigError(f"LOG_LEVEL {log_level!r} is not a logging level")
@@ -174,7 +184,12 @@ class Config:
             llm_base_url=env.get("LLM_BASE_URL", cls.llm_base_url),
             llm_api_key=env.get("LLM_API_KEY", ""),
             embedding_model=env.get("EMBEDDING_MODEL", cls.embedding_model),
-            embedding_prefix=env.get("EMBEDDING_PREFIX", ""),
+            embedding_query_prefix=env.get(
+                "EMBEDDING_QUERY_PREFIX", cls.embedding_query_prefix
+            ),
+            embedding_document_prefix=env.get(
+                "EMBEDDING_DOCUMENT_PREFIX", cls.embedding_document_prefix
+            ),
             embedding_context_length=_int(
                 env, "EMBEDDING_CONTEXT_LENGTH", cls.embedding_context_length
             ),

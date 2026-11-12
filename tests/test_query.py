@@ -15,7 +15,12 @@ from slack2rag.query import _print_result, _score_bar
 @pytest.fixture
 def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-    for var in ("HYBRID_SEARCH", "SCORE_THRESHOLD", "EMBEDDING_PREFIX", "LLM_API_KEY"):
+    for var in (
+        "HYBRID_SEARCH",
+        "SCORE_THRESHOLD",
+        "EMBEDDING_PREFIX",
+        "LLM_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("QDRANT_URL", "http://q:6333")
     monkeypatch.setenv("QDRANT_COLLECTION", "coll")
@@ -182,9 +187,10 @@ def test_main_with_results_and_args(
     mocks["embedder_cls"].assert_called_once_with(
         base_url="http://llm/v1",
         model="emb",
-        context_length=8192,
+        context_length=2048,
         api_key="",
-        input_prefix="",
+        query_prefix="search_query: ",
+        document_prefix="search_document: ",
     )
     mocks["store_cls"].assert_called_once_with(
         url="http://q:6333",
@@ -192,7 +198,7 @@ def test_main_with_results_and_args(
         dimension=3,
         hybrid=False,
     )
-    mocks["embedder"].embed.assert_called_once_with(["how do I deploy"])
+    mocks["embedder"].embed.assert_called_once_with(["how do I deploy"], kind="query")
     mocks["sparse_cls"].assert_not_called()
     mocks["store"].search.assert_called_once_with(
         query_vector=[0.1, 0.2, 0.3],
