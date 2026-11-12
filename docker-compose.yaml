@@ -27,7 +27,7 @@ services:
         required: false
     environment:
       QDRANT_URL: http://qdrant:6333
-      LLM_BASE_URL: http://ollama:11434/v1
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}  # the bundled Ollama unless .env says otherwise
       DATABASE_URL: postgresql://slack2rag:slack2rag@db:5432/slack2rag  # not-a-secret
       STATE_FILE: /data/state.json
     depends_on:

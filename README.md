@@ -103,7 +103,9 @@ Top 3 of 14,823 indexed messages
 
 Eval mode (`EVAL_TEST=true`) skips indexing and instead scores every message
 with `EVAL_MODEL` and `EVAL_PROMPT`, writing messages scoring 7 or more to
-`/results/good.txt` and the rest to `/results/bad.txt`.
+`/results/good.txt` and the rest to `/results/bad.txt`. The production
+compose file keeps them in the `slack2rag_results` volume; read them with
+`docker compose -f docker-compose.prod.yaml run --rm app cat /results/good.txt`.
 
 ### Querying from another application
 

@@ -53,6 +53,9 @@ before this one have no changelog entries.
 
 ### Fixed
 
+- The production compose file gives eval mode a `slack2rag_results`
+  volume for `/results`, and both compose files use `LLM_BASE_URL` from
+  `.env` when it is set, falling back to the bundled Ollama.
 - `EVAL_TEST=false` (or `0`) turned eval mode on; it is now read as a
   boolean.
 
