@@ -1,13 +1,18 @@
-.git
-.github
+# Keep the build context small and secret-free. README.md and LICENSE stay:
+# pyproject.toml needs them to build the package.
+.git/
+.github/
+.venv/
 .env
 .env.*
-!.env.example
-*.md
-docker-compose.yml
-LICENSE
-__pycache__
-*.pyc
-.pytest_cache
-.mypy_cache
-.ruff_cache
+**/__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+docs/
+tests/
+docker-compose*.yaml
+Dockerfile

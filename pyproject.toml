@@ -1,11 +1,83 @@
-[tool.ruff]
-target-version = "py312"
-line-length = 100
+[project]
+name = "slack2rag"
+version = "0.4.7"
+description = "Index Slack channel messages into a Qdrant vector database for RAG."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "John Romkey" }]
+# Keep in step with .python-version and the Dockerfile's python image.
+requires-python = ">=3.15"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.15",
+]
+dependencies = [
+  "alembic>=1.20.1",
+  "psycopg[binary]>=3.3.8",
+  "python-dotenv>=1.2.4",
+  "qdrant-client>=1.20.0",
+  "slack-sdk>=3.46.0",
+  "sqlalchemy>=2.1.8",
+  "tenacity>=9.2.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/romkey/slack2rag"
+Changelog = "https://github.com/romkey/slack2rag/blob/main/CHANGELOG.md"
+Issues = "https://github.com/romkey/slack2rag/issues"
+
+[project.scripts]
+slack2rag = "slack2rag.__main__:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=2.4.1",
+  "pytest>=9.2.0",
+  "pytest-cov>=7.1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
-ignore = ["E501"]
+select = [
+  "E", "W", "F",  # pycodestyle, pyflakes
+  "I",            # import order
+  "N",            # naming
+  "UP",           # modern syntax for requires-python
+  "B",            # likely bugs
+  "S",            # security
+  "C4", "SIM", "RET", "PTH",
+  "DTZ",          # timezone-aware datetimes
+  "T20",          # no print(); use logging
+  "LOG", "G",     # logging calls
+  "PT",           # pytest style
+  "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert is how pytest works
+"scripts/**" = ["T20"]  # command-line tools print
+# The query command's output is its results, written to stdout for a person
+# to read; that's print's job, not logging's.
+"src/slack2rag/query.py" = ["T20"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests", "scripts"]
 
 [tool.pytest.ini_options]
+addopts = ["--cov", "--cov-report=term-missing", "--strict-markers"]
 testpaths = ["tests"]
-pythonpath = ["."]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["src/slack2rag"]  # by path: Alembic loads migrations under its own module names
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+skip_covered = true
+exclude_also = ['if __name__ == "__main__":']

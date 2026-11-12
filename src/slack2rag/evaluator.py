@@ -2,22 +2,25 @@
 Message quality evaluator using an OpenAI-compatible chat-completions LLM.
 
 Sends each Slack message along with a user-supplied prompt to an LLM and
-expects a JSON response with ``score`` (1–10) and ``reason``.  Messages
+expects a JSON response with ``score`` (1-10) and ``reason``.  Messages
 scoring >= 7 are written to /results/good.txt; the rest go to
 /results/bad.txt.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
-import os
 import re
-import urllib.request
 import urllib.error
-from typing import List, Optional
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
 
 from .pg_store import PgStore
+from .slack_client import SlackClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,37 +35,50 @@ def _chat_completion(
     model: str,
     user_content: str,
     timeout: int = 120,
-) -> Optional[str]:
+) -> str | None:
     """Call /chat/completions and return the assistant's content string.
 
     Returns None on any HTTP/transport error (already logged).
     """
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
-    payload = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": user_content}],
-        "response_format": {"type": "json_object"},
-        "temperature": 0,
-        "stream": False,
-    }).encode()
+    # urlopen also accepts file: and other schemes; only HTTP(S) makes sense
+    # for a chat-completions API, so refuse anything else before sending.
+    if urllib.parse.urlsplit(endpoint).scheme not in ("http", "https"):
+        logger.error("LLM base URL must start with http:// or https://: %r", base_url)
+        return None
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": user_content}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+            "stream": False,
+        }
+    ).encode()
 
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+    # S310 below: the URL is the operator's configured LLM base URL, and the
+    # check above has already refused any scheme other than http/https.
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)  # noqa: S310
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            # Decoded JSON from the LLM server: shape is checked below.
+            data: Any = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         body = ""
-        try:
+        # The error body is only extra detail for the log; any failure
+        # reading it must not mask the HTTP error itself.
+        with contextlib.suppress(Exception):
             body = exc.read().decode(errors="replace").strip()
-        except Exception:
-            pass
         logger.error(
             "LLM returned HTTP %d for %s (model %r): %s",
-            exc.code, endpoint, model, body,
+            exc.code,
+            endpoint,
+            model,
+            body,
         )
         return None
     except urllib.error.URLError as exc:
@@ -70,17 +86,22 @@ def _chat_completion(
         return None
 
     try:
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
+        content: str = data["choices"][0]["message"]["content"]
+    except KeyError, IndexError, TypeError:
         logger.error(
             "Unexpected chat-completions response shape from %s: %s",
-            endpoint, json.dumps(data)[:300],
+            endpoint,
+            json.dumps(data)[:300],
         )
         return None
+    return content
 
 
 def score_message(
-    base_url: str, model: str, prompt: str, message: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    message: str,
     api_key: str = "",
 ) -> tuple[int | None, str]:
     """Ask the LLM to score *message* using *prompt*.
@@ -106,7 +127,8 @@ def score_message(
     except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         logger.warning(
             "JSON parse failed (%s).  Raw model response: %s",
-            exc, response_text,
+            exc,
+            response_text,
         )
         match = _SCORE_RE.search(response_text)
         if not match:
@@ -145,27 +167,34 @@ def run_eval(
     base_url: str,
     model: str,
     prompt: str,
-    channels: List[dict],
-    slack,
+    # Raw Slack channel objects (JSON with heterogeneous values).
+    channels: list[dict[str, Any]],
+    slack: SlackClient,
     api_key: str = "",
-    pg: Optional[PgStore] = None,
+    pg: PgStore | None = None,
 ) -> None:
     """Score every message in every channel and write results to files."""
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    good_path = os.path.join(RESULTS_DIR, "good.txt")
-    bad_path = os.path.join(RESULTS_DIR, "bad.txt")
+    results_dir = Path(RESULTS_DIR)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    good_path = results_dir / "good.txt"
+    bad_path = results_dir / "bad.txt"
 
     logger.info("Eval mode: scoring messages with model %r at %s", model, base_url)
     logger.info("  Prompt: %.200s", prompt)
-    logger.info("  Threshold: >= %d → %s, < %d → %s",
-                GOOD_THRESHOLD, good_path, GOOD_THRESHOLD, bad_path)
+    logger.info(
+        "  Threshold: >= %d → %s, < %d → %s",
+        GOOD_THRESHOLD,
+        good_path,
+        GOOD_THRESHOLD,
+        bad_path,
+    )
 
     total = 0
     good_count = 0
     bad_count = 0
     errors = 0
 
-    with open(good_path, "w") as good_f, open(bad_path, "w") as bad_f:
+    with good_path.open("w") as good_f, bad_path.open("w") as bad_f:
         for ch in channels:
             channel_id = ch["id"]
             channel_name = ch.get("name", channel_id)
@@ -192,7 +221,9 @@ def run_eval(
                 user_name = slack.get_user_name(user_id)
                 ts = msg["ts"]
 
-                score, reason = score_message(base_url, model, prompt, resolved_text, api_key=api_key)
+                score, reason = score_message(
+                    base_url, model, prompt, resolved_text, api_key=api_key
+                )
                 total += 1
 
                 if score is None:
@@ -200,11 +231,15 @@ def run_eval(
                     logger.warning(
                         "Eval: no score for message ts=%s in #%s — skipping.  "
                         "Preview: %.120s",
-                        ts, channel_name, resolved_text,
+                        ts,
+                        channel_name,
+                        resolved_text,
                     )
                     continue
 
-                line = _format_line(score, reason, channel_name, user_name, ts, resolved_text)
+                line = _format_line(
+                    score, reason, channel_name, user_name, ts, resolved_text
+                )
 
                 if score >= GOOD_THRESHOLD:
                     good_f.write(line)
@@ -216,11 +251,18 @@ def run_eval(
                 if total % 100 == 0:
                     logger.info(
                         "Eval progress: %d scored (%d good, %d bad, %d errors)",
-                        total, good_count, bad_count, errors,
+                        total,
+                        good_count,
+                        bad_count,
+                        errors,
                     )
 
     logger.info(
         "Eval complete: %d messages scored — %d good (>=%d), %d bad, %d errors",
-        total, good_count, GOOD_THRESHOLD, bad_count, errors,
+        total,
+        good_count,
+        GOOD_THRESHOLD,
+        bad_count,
+        errors,
     )
     logger.info("  Results: %s  %s", good_path, bad_path)

@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 
-from src.pg_store import PgStore
+from slack2rag.pg_store import PgStore, SchemaError, head_revision, migrate
 
 
 @pytest.fixture
@@ -18,11 +19,72 @@ def pg_url() -> str:
     return url
 
 
+def _drop_everything(url: str) -> None:
+    with psycopg.connect(url) as conn:
+        conn.execute(
+            "DROP TABLE IF EXISTS"
+            " slack_messages, slack_users, slack_channels, alembic_version"
+        )
+        conn.commit()
+
+
 @pytest.fixture
-def pg(pg_url: str) -> PgStore:
-    store = PgStore(pg_url)
-    store.init_schema()
-    return store
+def empty_db(pg_url: str) -> str:
+    """A database with none of slack2rag's tables (as if never migrated)."""
+    _drop_everything(pg_url)
+    return pg_url
+
+
+@pytest.fixture
+def pg(empty_db: str) -> PgStore:
+    migrate(empty_db)
+    return PgStore(empty_db)
+
+
+def test_check_schema_fails_before_migrate_and_passes_after(empty_db: str) -> None:
+    store = PgStore(empty_db)
+    assert store.schema_revision() is None
+    with pytest.raises(SchemaError, match="revision none"):
+        store.check_schema()
+
+    migrate(empty_db)
+
+    assert store.schema_revision() == head_revision()
+    store.check_schema()
+
+
+def test_migrate_is_idempotent(pg: PgStore, pg_url: str) -> None:
+    pg.upsert_channel({"id": "C_KEEP"})
+    migrate(pg_url)
+    pg.check_schema()
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute("SELECT count(*) FROM slack_channels").fetchone()
+        assert row is not None
+        assert row[0] == 1
+
+
+def test_downgrade_to_base_drops_tables(pg: PgStore, pg_url: str) -> None:
+    from alembic import command
+
+    from slack2rag.pg_store import _alembic_config
+
+    command.downgrade(_alembic_config(pg_url), "base")
+    assert pg.schema_revision() is None
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute("SELECT to_regclass('slack_channels')").fetchone()
+        assert row is not None
+        assert row[0] is None
+
+
+def test_migrate_adopts_tables_created_before_migrations(empty_db: str) -> None:
+    """Pre-Alembic databases already have the tables; migrate must accept them."""
+    with psycopg.connect(empty_db) as conn:
+        conn.execute(
+            "CREATE TABLE slack_channels (id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
+        )
+        conn.commit()
+    migrate(empty_db)
+    PgStore(empty_db).check_schema()
 
 
 def test_upsert_channel_user_message_roundtrip(pg: PgStore) -> None:
@@ -34,17 +96,17 @@ def test_upsert_channel_user_message_roundtrip(pg: PgStore) -> None:
     pg.upsert_user(user)
     pg.upsert_message("C_TEST", message)
 
-    import psycopg
-
     with psycopg.connect(pg._conninfo) as conn:
         ch = conn.execute(
-            "SELECT payload FROM slack_channels WHERE id = %s", ("C_TEST",),
+            "SELECT payload FROM slack_channels WHERE id = %s",
+            ("C_TEST",),
         ).fetchone()
         assert ch is not None
         assert ch[0]["name"] == "test-channel"
 
         u = conn.execute(
-            "SELECT payload FROM slack_users WHERE id = %s", ("U_TEST",),
+            "SELECT payload FROM slack_users WHERE id = %s",
+            ("U_TEST",),
         ).fetchone()
         assert u is not None
         assert u[0]["name"] == "alice"
@@ -69,8 +131,6 @@ def test_persist_channel_messages_and_users_calls_slack(pg: PgStore) -> None:
 
     slack.get_user_record.assert_called_with("U1")
 
-    import psycopg
-
     with psycopg.connect(pg._conninfo) as conn:
         row = conn.execute(
             "SELECT count(*) FROM slack_messages WHERE channel_id = %s",
@@ -92,8 +152,9 @@ def test_bulk_upsert_users(pg: PgStore) -> None:
     ]
     pg.bulk_upsert_users(users)
 
-    import psycopg
-
     with psycopg.connect(pg._conninfo) as conn:
-        n = conn.execute("SELECT count(*) FROM slack_users WHERE id IN ('U_A','U_B')").fetchone()[0]
-        assert n == 2
+        row = conn.execute(
+            "SELECT count(*) FROM slack_users WHERE id IN ('U_A','U_B')"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 2

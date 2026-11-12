@@ -7,7 +7,8 @@ Handles pagination, rate-limit back-off, and user-name caching.
 import logging
 import re
 import time
-from typing import Dict, Generator, List, Optional
+from collections.abc import Generator
+from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -16,22 +17,27 @@ logger = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 _CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)\|([^>]*)>")
-_URL_RE = re.compile(r"<(https?://[^|>]+)(?:\|([^>]*))?>" )
+_URL_RE = re.compile(r"<(https?://[^|>]+)(?:\|([^>]*))?>")
 _SPECIAL_RE = re.compile(r"<!(here|channel|everyone)>")
 
 # Slack free-plan Tier 3/4 methods allow ~50 req/min.  A 1.2 s pause
 # between calls keeps us under that without stalling too long.
 DEFAULT_API_PAUSE = 1.2
 
+# A raw Slack Web API JSON object (channel, message, user, ...).  Its shape
+# varies by method and by workspace, and slack_sdk itself returns it untyped,
+# so the values are Any; callers pick out the keys they need.
+SlackObject = dict[str, Any]
+
 
 class SlackClient:
     def __init__(self, token: str, api_pause: float = DEFAULT_API_PAUSE) -> None:
         self._client = WebClient(token=token)
-        self._user_cache: Dict[str, str] = {}
-        self._user_profiles: Dict[str, dict] = {}
-        self._user_raw: Dict[str, dict] = {}
+        self._user_cache: dict[str, str] = {}
+        self._user_profiles: dict[str, SlackObject] = {}
+        self._user_raw: dict[str, SlackObject] = {}
         self._api_pause = api_pause
-        self._workspace_url: Optional[str] = None
+        self._workspace_url: str | None = None
 
     def _pace(self) -> None:
         """Sleep between API calls to stay under Slack's rate limits."""
@@ -53,7 +59,9 @@ class SlackClient:
                 self._workspace_url = ""
         return self._workspace_url
 
-    def make_permalink(self, channel_id: str, ts: str, thread_ts: Optional[str] = None) -> str:
+    def make_permalink(
+        self, channel_id: str, ts: str, thread_ts: str | None = None
+    ) -> str:
         """Construct a Slack permalink from channel ID and timestamp."""
         base = self.fetch_workspace_url()
         if not base:
@@ -66,18 +74,20 @@ class SlackClient:
 
     # ── channels ──────────────────────────────────────────────────────────────
 
-    def get_public_channels(self, channel_names: Optional[List[str]] = None) -> List[dict]:
+    def get_public_channels(
+        self, channel_names: list[str] | None = None
+    ) -> list[SlackObject]:
         """
         Return public channels the bot can see.
 
         If *channel_names* is provided, only those channels are returned
         (matching by name or ID).
         """
-        channels: List[dict] = []
+        channels: list[SlackObject] = []
         cursor = None
 
         while True:
-            kwargs: dict = {
+            kwargs: dict[str, Any] = {
                 "types": "public_channel",
                 "exclude_archived": True,
                 "limit": 200,
@@ -92,10 +102,9 @@ class SlackClient:
                 logger.error("conversations.list error: %s", exc.response["error"])
                 break
 
-            for ch in resp.get("channels", []):
-                channels.append(ch)
+            channels.extend(resp.get("channels", []))
 
-            meta = resp.get("response_metadata", {})
+            meta: SlackObject = resp.get("response_metadata", {})
             cursor = meta.get("next_cursor")
             if not cursor:
                 break
@@ -103,8 +112,7 @@ class SlackClient:
         if channel_names:
             needle = {n.lstrip("#") for n in channel_names}
             channels = [
-                ch for ch in channels
-                if ch["name"] in needle or ch["id"] in needle
+                ch for ch in channels if ch["name"] in needle or ch["id"] in needle
             ]
             found = {ch["name"] for ch in channels} | {ch["id"] for ch in channels}
             for name in needle:
@@ -123,7 +131,8 @@ class SlackClient:
             return True
         except SlackApiError as exc:
             logger.warning(
-                "Could not join channel %s: %s  (add channels:join scope to your Slack app)",
+                "Could not join channel %s: %s  "
+                "(add channels:join scope to your Slack app)",
                 channel_id,
                 exc.response["error"],
             )
@@ -134,8 +143,8 @@ class SlackClient:
     def get_channel_messages(
         self,
         channel_id: str,
-        oldest_ts: Optional[str] = None,
-    ) -> Generator[dict, None, None]:
+        oldest_ts: str | None = None,
+    ) -> Generator[SlackObject]:
         """
         Yield every top-level message in *channel_id*, newest-first.
 
@@ -145,7 +154,7 @@ class SlackClient:
         cursor = None
 
         while True:
-            kwargs: dict = {"channel": channel_id, "limit": 200}
+            kwargs: dict[str, Any] = {"channel": channel_id, "limit": 200}
             if oldest_ts:
                 kwargs["oldest"] = oldest_ts
             if cursor:
@@ -161,27 +170,39 @@ class SlackClient:
                         continue  # retry after joining
                     return
                 else:
-                    logger.error("conversations.history error for %s: %s", channel_id, error)
+                    logger.error(
+                        "conversations.history error for %s: %s", channel_id, error
+                    )
                 return
 
+            msg: SlackObject
             for msg in resp.get("messages", []):
                 # Skip channel join/leave noise and bot messages without text
-                if msg.get("subtype") in ("channel_join", "channel_leave", "channel_purpose", "channel_topic"):
+                if msg.get("subtype") in (
+                    "channel_join",
+                    "channel_leave",
+                    "channel_purpose",
+                    "channel_topic",
+                ):
                     continue
                 yield msg
 
-            meta = resp.get("response_metadata", {})
+            meta: SlackObject = resp.get("response_metadata", {})
             cursor = meta.get("next_cursor")
             if not cursor:
                 break
 
-    def get_thread_replies(self, channel_id: str, thread_ts: str) -> List[dict]:
+    def get_thread_replies(self, channel_id: str, thread_ts: str) -> list[SlackObject]:
         """Return all replies in a thread (excludes the root message)."""
-        replies: List[dict] = []
+        replies: list[SlackObject] = []
         cursor = None
 
         while True:
-            kwargs: dict = {"channel": channel_id, "ts": thread_ts, "limit": 200}
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "ts": thread_ts,
+                "limit": 200,
+            }
             if cursor:
                 kwargs["cursor"] = cursor
 
@@ -191,15 +212,17 @@ class SlackClient:
             except SlackApiError as exc:
                 logger.warning(
                     "conversations.replies error for thread %s/%s: %s",
-                    channel_id, thread_ts, exc.response["error"],
+                    channel_id,
+                    thread_ts,
+                    exc.response["error"],
                 )
                 return []
 
-            msgs = resp.get("messages", [])
+            msgs: list[SlackObject] = resp.get("messages", [])
             # First message is the root; skip it when appending
             replies.extend(msgs[1:] if not replies else msgs)
 
-            meta = resp.get("response_metadata", {})
+            meta: SlackObject = resp.get("response_metadata", {})
             cursor = meta.get("next_cursor")
             if not cursor:
                 break
@@ -218,7 +241,7 @@ class SlackClient:
         cursor = None
         count = 0
         while True:
-            kwargs: dict = {"limit": 200}
+            kwargs: dict[str, Any] = {"limit": 200}
             if cursor:
                 kwargs["cursor"] = cursor
             try:
@@ -228,10 +251,11 @@ class SlackClient:
                 logger.warning("users.list error: %s", exc.response["error"])
                 break
 
+            user: SlackObject
             for user in resp.get("members", []):
-                uid = user["id"]
+                uid: str = user["id"]
                 self._user_raw[uid] = user
-                profile = user.get("profile", {})
+                profile: SlackObject = user.get("profile", {})
                 name = (
                     profile.get("display_name")
                     or profile.get("real_name")
@@ -242,14 +266,14 @@ class SlackClient:
                 self._user_profiles[uid] = self._extract_profile(user)
                 count += 1
 
-            meta = resp.get("response_metadata", {})
+            meta: SlackObject = resp.get("response_metadata", {})
             cursor = meta.get("next_cursor")
             if not cursor:
                 break
 
         logger.info("Prefetched %d user names", count)
 
-    def get_user_record(self, user_id: str) -> Optional[dict]:
+    def get_user_record(self, user_id: str) -> SlackObject | None:
         """Return the full Slack user object for *user_id*, fetching if needed."""
         if user_id in self._user_raw:
             return self._user_raw[user_id]
@@ -257,7 +281,7 @@ class SlackClient:
         try:
             resp = self._client.users_info(user=user_id)
             self._pace()
-            user = resp["user"]
+            user: SlackObject = resp["user"]
         except SlackApiError:
             return None
 
@@ -282,16 +306,16 @@ class SlackClient:
         self._user_cache[user_id] = user_id
         return user_id
 
-    def user_records(self) -> List[dict]:
+    def user_records(self) -> list[SlackObject]:
         """Return full user dicts seen via prefetch or users.info (for bulk export)."""
         return list(self._user_raw.values())
 
-    def get_user_profiles(self) -> Dict[str, dict]:
+    def get_user_profiles(self) -> dict[str, SlackObject]:
         """Return all cached user profiles (populated by prefetch_users)."""
         return self._user_profiles
 
     @staticmethod
-    def _extract_profile(user: dict) -> dict:
+    def _extract_profile(user: SlackObject) -> SlackObject:
         """Pull the fields we want from a Slack user object.  No emails."""
         profile = user.get("profile", {})
         return {
@@ -316,7 +340,7 @@ class SlackClient:
     # ── message metadata helpers ─────────────────────────────────────────────
 
     @staticmethod
-    def get_reactions(msg: dict) -> tuple[int, List[str]]:
+    def get_reactions(msg: SlackObject) -> tuple[int, list[str]]:
         """Return (total_reaction_count, list_of_reaction_names) from a message."""
         reactions = msg.get("reactions", [])
         names = [r["name"] for r in reactions]
@@ -324,19 +348,19 @@ class SlackClient:
         return total, names
 
     @staticmethod
-    def get_attachments(msg: dict) -> List[str]:
+    def get_attachments(msg: SlackObject) -> list[str]:
         """Return list of filenames from message attachments/files."""
-        filenames: List[str] = []
+        filenames: list[str] = []
         for f in msg.get("files", []):
             name = f.get("name") or f.get("title") or f.get("id", "unknown_file")
             filenames.append(name)
         return filenames
 
     @staticmethod
-    def get_channel_topic(channel: dict) -> str:
+    def get_channel_topic(channel: SlackObject) -> str:
         """Extract the channel topic or purpose string."""
-        topic = channel.get("topic", {}).get("value", "")
-        purpose = channel.get("purpose", {}).get("value", "")
+        topic: str = channel.get("topic", {}).get("value", "")
+        purpose: str = channel.get("purpose", {}).get("value", "")
         return topic or purpose
 
     # ── text helpers ──────────────────────────────────────────────────────────
@@ -356,5 +380,4 @@ class SlackClient:
             lambda m: f"{m.group(2)} ({m.group(1)})" if m.group(2) else m.group(1),
             text,
         )
-        text = _SPECIAL_RE.sub(lambda m: f"@{m.group(1)}", text)
-        return text
+        return _SPECIAL_RE.sub(lambda m: f"@{m.group(1)}", text)

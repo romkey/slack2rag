@@ -4,17 +4,30 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from typing import TypedDict
 
 import pytest
 
-from src.embedder import Embedder, EmbeddingError
+from slack2rag.embedder import Embedder, EmbeddingError
+
+
+class _Payload(TypedDict):
+    model: str
+    input: list[str]
+
+
+def _payload(req: urllib.request.Request) -> _Payload:
+    """The JSON body the embedder sent."""
+    assert isinstance(req.data, bytes)
+    payload: _Payload = json.loads(req.data)
+    return payload
 
 
 class _JsonResponse:
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: object) -> None:
         self._body = body
 
-    def __enter__(self) -> "_JsonResponse":
+    def __enter__(self) -> _JsonResponse:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -24,7 +37,7 @@ class _JsonResponse:
         return json.dumps(self._body).encode()
 
 
-def _embedding_list(vectors: list[list[float]]) -> dict:
+def _embedding_list(vectors: list[list[float]]) -> dict[str, object]:
     return {
         "object": "list",
         "data": [
@@ -36,8 +49,10 @@ def _embedding_list(vectors: list[list[float]]) -> dict:
     }
 
 
-def test_embedder_uses_openai_embeddings_endpoint(monkeypatch) -> None:
-    payloads: list[dict] = []
+def test_embedder_uses_openai_embeddings_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads: list[_Payload] = []
     urls: list[str] = []
     auth_headers: list[str | None] = []
 
@@ -45,7 +60,7 @@ def test_embedder_uses_openai_embeddings_endpoint(monkeypatch) -> None:
         assert timeout == 120
         urls.append(req.full_url)
         auth_headers.append(req.get_header("Authorization"))
-        payload = json.loads(req.data.decode())
+        payload = _payload(req)
         payloads.append(payload)
         return _JsonResponse(_embedding_list([[1.0]] * len(payload["input"])))
 
@@ -75,12 +90,14 @@ def test_embedder_uses_openai_embeddings_endpoint(monkeypatch) -> None:
     }
 
 
-def test_embedder_omits_auth_header_when_no_key(monkeypatch) -> None:
+def test_embedder_omits_auth_header_when_no_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     auth_headers: list[str | None] = []
 
     def fake_urlopen(req: urllib.request.Request, timeout: int) -> _JsonResponse:
         auth_headers.append(req.get_header("Authorization"))
-        payload = json.loads(req.data.decode())
+        payload = _payload(req)
         return _JsonResponse(_embedding_list([[1.0]] * len(payload["input"])))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -89,24 +106,26 @@ def test_embedder_omits_auth_header_when_no_key(monkeypatch) -> None:
     assert auth_headers == [None]
 
 
-def test_embedder_orders_by_index(monkeypatch) -> None:
+def test_embedder_orders_by_index(monkeypatch: pytest.MonkeyPatch) -> None:
     """Servers may return items in any order; we sort by `index`."""
 
     def fake_urlopen(req: urllib.request.Request, timeout: int) -> _JsonResponse:
-        payload = json.loads(req.data.decode())
+        payload = _payload(req)
         n = len(payload["input"])
         if n == 1:
             return _JsonResponse(_embedding_list([[0.0]]))
         # Return in reverse order with explicit indexes
-        return _JsonResponse({
-            "object": "list",
-            "data": [
-                {"index": 2, "embedding": [0.3]},
-                {"index": 0, "embedding": [0.1]},
-                {"index": 1, "embedding": [0.2]},
-            ],
-            "model": "m",
-        })
+        return _JsonResponse(
+            {
+                "object": "list",
+                "data": [
+                    {"index": 2, "embedding": [0.3]},
+                    {"index": 0, "embedding": [0.1]},
+                    {"index": 1, "embedding": [0.2]},
+                ],
+                "model": "m",
+            }
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -114,24 +133,28 @@ def test_embedder_orders_by_index(monkeypatch) -> None:
     assert embedder.embed(["a", "b", "c"]) == [[0.1], [0.2], [0.3]]
 
 
-def test_embedder_falls_back_to_single_input_on_null_batch(monkeypatch) -> None:
+def test_embedder_falls_back_to_single_input_on_null_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ollama's /v1/embeddings returns null embeddings for array inputs;
     after the first bad batch we drop to one-input-per-request."""
     calls: list[int] = []
 
     def fake_urlopen(req: urllib.request.Request, timeout: int) -> _JsonResponse:
-        payload = json.loads(req.data.decode())
+        payload = _payload(req)
         n = len(payload["input"])
         calls.append(n)
         if n == 1:
             # single-input requests work fine
             return _JsonResponse(_embedding_list([[float(len(calls))]]))
         # array input: server returns nulls (the bug we're working around)
-        return _JsonResponse({
-            "object": "list",
-            "data": [{"index": i, "embedding": None} for i in range(n)],
-            "model": "m",
-        })
+        return _JsonResponse(
+            {
+                "object": "list",
+                "data": [{"index": i, "embedding": None} for i in range(n)],
+                "model": "m",
+            }
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -153,7 +176,9 @@ def test_embedder_falls_back_to_single_input_on_null_batch(monkeypatch) -> None:
     assert calls == [1, 3, 1, 1, 1, 1, 1]
 
 
-def test_embedder_raises_when_single_input_returns_null(monkeypatch) -> None:
+def test_embedder_raises_when_single_input_returns_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If even single-input mode produces a null embedding, we raise clearly."""
     counter = {"n": 0}
 
@@ -162,11 +187,13 @@ def test_embedder_raises_when_single_input_returns_null(monkeypatch) -> None:
         if counter["n"] == 1:
             # probe succeeds so we get past __init__
             return _JsonResponse(_embedding_list([[1.0]]))
-        return _JsonResponse({
-            "object": "list",
-            "data": [{"index": 0, "embedding": None}],
-            "model": "m",
-        })
+        return _JsonResponse(
+            {
+                "object": "list",
+                "data": [{"index": 0, "embedding": None}],
+                "model": "m",
+            }
+        )
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     embedder = Embedder(base_url="http://x/v1", model="m")

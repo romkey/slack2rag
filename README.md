@@ -1,173 +1,93 @@
 # slack2rag
 
-Indexes Slack public-channel messages into a [Qdrant](https://qdrant.tech/) vector database for use with Retrieval-Augmented Generation (RAG).  Embeddings (and the optional message-quality evaluator) are generated through any **OpenAI-compatible** inference endpoint — OpenAI itself, [Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio, etc.
+[![CI](https://github.com/romkey/slack2rag/actions/workflows/ci.yaml/badge.svg)](https://github.com/romkey/slack2rag/actions/workflows/ci.yaml)
+[![Lint](https://github.com/romkey/slack2rag/actions/workflows/lint.yaml/badge.svg)](https://github.com/romkey/slack2rag/actions/workflows/lint.yaml)
+[![Python 3.15](https://img.shields.io/badge/python-3.15-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+slack2rag indexes the messages in your Slack channels into a
+[Qdrant](https://qdrant.tech/) vector database, so a Retrieval-Augmented
+Generation (RAG) chatbot or any other app can search your team's
+conversations by meaning. It keeps the index current with incremental syncs,
+groups threads, and stores rich metadata (channel, author, date, reactions,
+permalinks). Embeddings, and an optional message-quality evaluator, come from
+any **OpenAI-compatible** inference endpoint: OpenAI itself,
+[Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio.
+
+> **AI disclosure:** This project was written by AI under human oversight,
+> following [these rules](https://github.com/romkey/python-ai-rules/blob/main/RULES.md).
 
 ```
-Slack API  →  slack2rag  →  Qdrant
+Slack API  →  slack2rag  →  Qdrant  ←  any app, via Qdrant's REST API
                   ↕
        OpenAI-compatible LLM
-                  ↑
-    any app can query the Qdrant REST API
 ```
 
----
+## What's here
 
-## Requirements
+| Path | What it is |
+|------|------------|
+| `src/slack2rag/__main__.py` | The `slack2rag` command: `run` (default), `query`, `migrate` |
+| `src/slack2rag/main.py` | The sync loop, with thread-update refresh and summary documents |
+| `src/slack2rag/slack_client.py` | Slack Web API: channels, history, threads, users, pagination |
+| `src/slack2rag/processor.py` | Slack messages → `Document`s: thread grouping, chunking, summaries |
+| `src/slack2rag/embedder.py` | OpenAI-compatible `/embeddings` client and the sparse (BM25-like) encoder |
+| `src/slack2rag/vector_store.py` | Qdrant collection setup, upsert, search and hybrid search |
+| `src/slack2rag/evaluator.py` | Eval mode: scores messages with an OpenAI-compatible `/chat/completions` model |
+| `src/slack2rag/pg_store.py`, `migrations/` | Optional PostgreSQL copy of raw Slack payloads, with Alembic migrations |
+| `src/slack2rag/state.py` | Per-channel sync cursors, as JSON on disk |
+| `src/slack2rag/config.py` | Settings from environment variables |
+| `src/slack2rag/query.py` | The `slack2rag query` command-line search |
+| `tests/` | pytest tests, one file per module |
+| `docs/configuration.md` | Every environment variable |
 
-* Docker + Docker Compose
-* A Slack app with a **Bot Token** (`xoxb-…`)
-* An OpenAI-compatible inference endpoint with an embedding model available
-  (the bundled `docker-compose.yml` ships an Ollama service for this)
+## Technical details
 
-### Slack app setup
+### How a sync works
 
-1. Go to <https://api.slack.com/apps> and create a new app ("From scratch").
-2. Under **OAuth & Permissions → Bot Token Scopes** add:
-   | Scope | Used for |
-   |---|---|
-   | `channels:read` | list public channels |
-   | `channels:history` | read messages |
-   | `channels:join` | auto-join public channels (no manual `/invite` needed) |
-   | `users:read` | resolve user mentions to names |
-3. Install the app to your workspace and copy the **Bot User OAuth Token**.
-4. Invite the bot to any private channels you also want indexed:
-   `/invite @your-bot-name`  (public channels are accessible without this).
+1. List public channels (or those in `SLACK_CHANNELS`), skipping `SLACK_CHANNEL_BLACKLIST`.
+2. For each channel, fetch messages newer than its saved cursor, joining the
+   channel if needed, and their thread replies.
+3. Turn each message and its thread into documents: long text is chunked,
+   short standalone messages are skipped, and well-reacted messages are
+   marked `[highlighted by team]`.
+4. Embed in batches and upsert into Qdrant; advance the cursor.
+5. Optionally re-index threads that gained replies in the last
+   `THREAD_UPDATE_LOOKBACK_HOURS`.
+6. Write summary documents for each channel, the workspace, users and the team.
+7. Sleep `SYNC_INTERVAL_MINUTES`, or exit if `RUN_ONCE=true`. `docker stop`
+   (SIGTERM) ends the loop cleanly between cycles.
 
-> **Free-plan note:** Slack's free plan only retains 90 days of message history.  Only those messages will be indexed.
+The first sync indexes everything the bot can see; later ones are
+incremental. Slack's free plan only keeps 90 days of history, so only those
+messages can be indexed.
 
----
+With `HYBRID_SEARCH=true`, each document also gets a sparse keyword vector,
+and searches fuse dense and sparse results with Reciprocal Rank Fusion. That
+catches exact matches (project names, error codes, ticket IDs) that pure
+semantic search misses. Turning it on, or changing the embedding model,
+needs a fresh Qdrant collection.
 
-## Quick start
+With `DATABASE_URL` set, every channel, user and raw message payload is also
+upserted into PostgreSQL as JSONB.
 
-```bash
-cp .env.example .env
-# Edit .env and set SLACK_BOT_TOKEN
-
-# Start Qdrant, Ollama, and slack2rag
-docker compose up --build -d
-
-# Pull the embedding model (first time only)
-docker compose exec ollama ollama pull nomic-embed-text
-```
-
-The first sync indexes all accessible public channels.  Subsequent runs are incremental.
-
-> If you already have Ollama running on the host, comment out the `ollama` service in `docker-compose.yml` and set `LLM_BASE_URL=http://host.docker.internal:11434/v1` in `.env`.  To use OpenAI (or another OpenAI-compatible provider) instead, set `LLM_BASE_URL=https://api.openai.com/v1` and `LLM_API_KEY=sk-…`.
-
-### Verifying connectivity
-
-Before kicking off a full sync, confirm slack2rag can talk to the configured embedding and evaluator models:
-
-```bash
-docker compose run --rm slack2rag python -m src.main --check
-```
-
-This embeds a probe string and (if `EVAL_MODEL` is set) sends a tiny chat-completions request, then exits 0 on success or 1 on any failure.
-
----
-
-## Pre-built image
-
-Every push to `main` (and every semver tag) publishes a Docker image to the GitHub Container Registry:
+### Command line
 
 ```
-ghcr.io/<owner>/slack2rag:latest
-ghcr.io/<owner>/slack2rag:v1.2.3
+slack2rag [--check]              index Slack into Qdrant (the default; same as `slack2rag run`)
+slack2rag query [options] TEXT   semantic search over the index
+slack2rag migrate                create or upgrade the PostgreSQL schema
+slack2rag --version
 ```
 
-To use the pre-built image instead of building from source:
+`--check` embeds a probe string and, if `EVAL_MODEL` is set, sends a tiny
+chat request, then exits 0 if both worked or 1 if not. Use it before a first
+full sync.
 
-```bash
-IMAGE=ghcr.io/<owner>/slack2rag:latest docker compose up
-```
+`slack2rag query` options: `-n/--limit N`, `-c/--channel NAME_OR_ID`,
+`--date-from YYYY-MM-DD`, `--date-to YYYY-MM-DD`, `--no-score`. Example
+output:
 
----
-
-## Configuration
-
-All configuration is via environment variables (or `.env`).
-
-### Core settings
-
-| Variable | Default | Description |
-|---|---|---|
-| `SLACK_BOT_TOKEN` | **required** | Bot token from api.slack.com |
-| `SLACK_CHANNELS` | *(empty)* | Comma-separated channel names/IDs to index.  Empty = all public channels |
-| `QDRANT_URL` | `http://qdrant:6333` | Qdrant REST endpoint |
-| `QDRANT_COLLECTION` | `slack_messages` | Collection name |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL.  `/embeddings` and `/chat/completions` are appended automatically |
-| `LLM_API_KEY` | *(empty)* | Bearer token for the LLM endpoint.  Required for OpenAI; optional for most local servers |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Model name for embeddings (must exist on the LLM server) |
-| `EMBEDDING_PREFIX` | *(empty)* | Optional prefix prepended to every embedding input, e.g. `search_document:` |
-| `EMBEDDING_CONTEXT_LENGTH` | `8192` | Max tokens per embedding input.  Texts are truncated at a word boundary.  `0` disables truncation |
-| `SYNC_INTERVAL_MINUTES` | `60` | Minutes between syncs |
-| `RUN_ONCE` | `false` | Exit after one sync (for cron/k8s jobs) |
-| `BATCH_SIZE` | `50` | Messages embedded per batch |
-| `SLACK_API_PAUSE` | `1.2` | Seconds between Slack API calls |
-
-### Eval mode (optional)
-
-| Variable | Default | Description |
-|---|---|---|
-| `EVAL_TEST` | *(empty)* | Set to any value to enable eval mode (scans messages, scores them, skips indexing) |
-| `EVAL_MODEL` | *(empty)* | Chat-completions model used to score messages |
-| `EVAL_PROMPT` | *(empty)* | Prompt prepended to each message before scoring |
-| `EVAL_BASE_URL` | falls back to `LLM_BASE_URL` | Override to point the evaluator at a different OpenAI-compatible endpoint |
-| `EVAL_API_KEY` | falls back to `LLM_API_KEY` | Override key for the evaluator endpoint |
-
-### Retrieval quality
-
-| Variable | Default | Description |
-|---|---|---|
-| `SCORE_THRESHOLD` | `0.0` | Minimum cosine similarity (0.0–1.0). Results below this are discarded. |
-| `HYBRID_SEARCH` | `false` | Enable dense + sparse hybrid search with RRF fusion |
-| `MIN_MESSAGE_LENGTH` | `20` | Skip standalone messages shorter than this (threads always kept) |
-| `THREAD_UPDATE_LOOKBACK_HOURS` | `0` | Hours to look back for thread updates (0 = disabled) |
-
-### Choosing an embedding model
-
-Any embedding model your inference server exposes will work.  For Ollama, pull it first with `ollama pull <model>`.
-
-| Model | Dims | Notes |
-|---|---|---|
-| `nomic-embed-text` (default) | 768 | Strong general-purpose Ollama model (recommended for local) |
-| `mxbai-embed-large` | 1024 | High quality (Ollama) |
-| `all-minilm` | 384 | Lightweight (Ollama) |
-| `text-embedding-3-small` | 1536 | OpenAI, fast and cheap |
-| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
-
-> **Note:** Changing the embedding model requires deleting the Qdrant collection and re-indexing (the vector dimensions change).
-
-### Hybrid search
-
-When `HYBRID_SEARCH=true`, each document is stored with both a dense embedding and a sparse (BM25-like) keyword vector.  At query time, both are searched and results are fused with Reciprocal Rank Fusion (RRF).  This catches keyword/exact-match queries (project names, error codes, ticket IDs) that pure semantic search misses.
-
-> **Note:** Enabling hybrid search requires a fresh Qdrant collection (the schema changes from a single vector to named dense + sparse vectors).
-
----
-
-## Querying from the command line
-
-A built-in CLI tool is included in the image:
-
-```bash
-# basic search
-docker compose run --rm query "how do I reset my password?"
-
-# limit results
-docker compose run --rm query --limit 10 "deploy process"
-
-# filter by channel
-docker compose run --rm query --channel engineering "incident postmortem"
-
-# filter by date range
-docker compose run --rm query --date-from 2024-06-01 --date-to 2024-06-30 "outage"
-
-# hide relevance score bars
-docker compose run --rm query --no-score "onboarding"
-```
-
-Example output:
 ```
 Searching for: "how do I reset my password?"
 
@@ -181,26 +101,32 @@ Top 3 of 14,823 indexed messages
   🔗 https://myworkspace.slack.com/archives/C04ABCDEF/p1710234900123456
 ```
 
----
+Eval mode (`EVAL_TEST=true`) skips indexing and instead scores every message
+with `EVAL_MODEL` and `EVAL_PROMPT`, writing messages scoring 7 or more to
+`/results/good.txt` and the rest to `/results/bad.txt`. The production
+compose file keeps them in the `slack2rag_results` volume; read them with
+`docker compose -f docker-compose.prod.yaml run --rm app cat /results/good.txt`.
 
-## Querying from another application
+### Querying from another application
 
-Qdrant exposes a REST API on port **6333** (and gRPC on 6334).
-
-### Python (qdrant-client)
+Qdrant serves a REST API on port **6333** (gRPC on 6334). Embed the query
+with the same model slack2rag uses, then search:
 
 ```python
 import json, urllib.request
 from qdrant_client import QdrantClient
 
-# Get embedding from any OpenAI-compatible endpoint (Ollama's /v1 shown here)
-payload = json.dumps({"model": "nomic-embed-text", "input": ["how do I set up SSO?"]}).encode()
-req = urllib.request.Request("http://localhost:11434/v1/embeddings",
-                             data=payload, headers={"Content-Type": "application/json"})
+payload = json.dumps(
+    {"model": "nomic-embed-text", "input": ["how do I set up SSO?"]}
+).encode()
+req = urllib.request.Request(
+    "http://localhost:11434/v1/embeddings",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+)
 with urllib.request.urlopen(req) as resp:
     vector = json.loads(resp.read())["data"][0]["embedding"]
 
-# Search Qdrant
 client = QdrantClient("http://localhost:6333")
 response = client.query_points(
     collection_name="slack_messages",
@@ -208,51 +134,18 @@ response = client.query_points(
     limit=5,
     with_payload=True,
 )
-
 for hit in response.points:
     p = hit.payload
     print(f"[{p['datetime']}] #{p['channel_name']}  {p['user_name']}")
     print(p["text"])
-    if p.get("permalink"):
-        print(p["permalink"])
-    print()
 ```
 
-### Filtering by channel or date
+Filter by channel with
+`models.FieldCondition(key="channel_name", match=models.MatchValue(value="engineering"))`.
 
-```python
-from qdrant_client.http import models
+### Payload schema
 
-response = client.query_points(
-    collection_name="slack_messages",
-    query=vector,
-    limit=10,
-    query_filter=models.Filter(
-        must=[
-            models.FieldCondition(key="channel_name", match=models.MatchValue(value="engineering")),
-            models.FieldCondition(key="date", range=models.Range(gte="2024-01-01")),
-        ]
-    ),
-)
-```
-
-### REST (curl)
-
-```bash
-curl -s http://localhost:6333/collections/slack_messages/points/search \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "vector": [/* your query vector */],
-    "limit": 5,
-    "with_payload": true
-  }'
-```
-
----
-
-## Payload schema
-
-Each stored point carries this payload:
+Each stored point carries:
 
 ```json
 {
@@ -274,38 +167,112 @@ Each stored point carries this payload:
 }
 ```
 
-### Payload indexes
+Indexed fields: `channel_id`, `channel_name`, `date`, `user_id` (keyword),
+`text` (full-text), `reaction_count` (integer).
 
-| Field | Index type | Use |
+### Choosing an embedding model
+
+Any embedding model your inference server offers works; with Ollama, pull it
+first (`ollama pull <model>`). Set `EMBEDDING_CONTEXT_LENGTH` to match.
+
+| Model | Dims | Notes |
 |---|---|---|
-| `channel_id` | keyword | Filter by channel ID |
-| `channel_name` | keyword | Filter by channel name |
-| `date` | keyword | Date range queries |
-| `user_id` | keyword | Filter by author |
-| `text` | full-text | Keyword search and text matching |
-| `reaction_count` | integer | Quality-weighted retrieval |
+| `nomic-embed-text` (default) | 768 | Strong general-purpose Ollama model |
+| `mxbai-embed-large` | 1024 | High quality (Ollama) |
+| `all-minilm` | 384 | Lightweight (Ollama) |
+| `text-embedding-3-small` | 1536 | OpenAI, fast and cheap |
+| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
 
----
+## Running it
 
-## Architecture
+### Slack app setup
 
-```
-docker-compose.yml
-├── qdrant          — vector DB, persistent volume, REST API on :6333
-├── ollama          — OpenAI-compatible LLM server on :11434 (optional; swap for any OpenAI-compatible endpoint)
-└── slack2rag
-    ├── slack_client.py   — Slack Web API (pagination, rate-limit retries)
-    ├── processor.py      — message → Document (thread grouping, chunking)
-    ├── embedder.py       — OpenAI-compatible /embeddings client + sparse encoder
-    ├── evaluator.py      — OpenAI-compatible /chat/completions message scorer
-    ├── vector_store.py   — Qdrant upsert / search / hybrid search
-    ├── state.py          — per-channel sync cursor (JSON on disk)
-    ├── config.py         — configuration from environment variables
-    └── main.py           — sync loop with thread-update refresh
-```
+1. Create an app ("From scratch") at <https://api.slack.com/apps>.
+2. Under **OAuth & Permissions → Bot Token Scopes** add `channels:read`
+   (list channels), `channels:history` (read messages), `channels:join`
+   (join public channels without an `/invite`) and `users:read` (resolve
+   names).
+3. Install the app to your workspace and copy the **Bot User OAuth Token**
+   (`xoxb-…`).
+4. `/invite @your-bot-name` to any private channels you also want indexed.
 
-## Running one-shot (e.g. cron)
+### With Docker
+
+Requires Docker. Configuration comes from environment variables, kept in
+`.env` (see [docs/configuration.md](docs/configuration.md)):
 
 ```bash
-RUN_ONCE=true docker compose run --rm slack2rag
+cp .env.example .env   # then set SLACK_BOT_TOKEN
+docker compose -f docker-compose.prod.yaml up -d
+docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text   # first time
+docker compose -f docker-compose.prod.yaml run --rm app slack2rag --check
+docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy process"
 ```
+
+That runs the latest release from `ghcr.io/romkey/slack2rag` with Qdrant
+and Ollama; set `APP_VERSION=X.Y.Z` to pin one. To use an Ollama already
+running on the host, remove the `ollama` service and set
+`CONTAINER_LLM_BASE_URL=http://host.docker.internal:11434/v1`; for OpenAI,
+set `CONTAINER_LLM_BASE_URL=https://api.openai.com/v1` and `LLM_API_KEY`.
+
+For the optional PostgreSQL store, set `POSTGRES_USER`, `POSTGRES_PASSWORD`,
+`POSTGRES_DB` and `DATABASE_URL` (host `db`) in `.env` and
+`COMPOSE_PROFILES=postgres`; a `migrate` service upgrades the schema before
+the app starts.
+
+For a one-shot sync (cron, Kubernetes jobs), set `RUN_ONCE=true` and
+`docker compose -f docker-compose.prod.yaml run --rm app`.
+
+### With pip
+
+Needs Python 3.15 or newer. Install into a virtual environment from a
+release's wheel:
+
+```bash
+python3 -m venv ~/.venvs/slack2rag
+~/.venvs/slack2rag/bin/pip install https://github.com/romkey/slack2rag/releases/download/vX.Y.Z/slack2rag-X.Y.Z-py3-none-any.whl
+~/.venvs/slack2rag/bin/slack2rag --version
+```
+
+Set its environment variables yourself, or put them in a `.env` file in the
+directory you run it from (see [docs/configuration.md](docs/configuration.md)).
+You also need Qdrant and an embedding server it can reach.
+
+## Development
+
+With Docker, nothing else to install:
+
+```bash
+docker compose up --build                                  # app, Qdrant, Ollama, PostgreSQL, from the working tree
+docker compose -f docker-compose.test.yaml run --rm test   # tests with coverage, against a real PostgreSQL
+docker compose -f docker-compose.lint.yaml run --rm lint   # every lint check, as CI runs them
+```
+
+With [uv](https://docs.astral.sh/uv/), which installs the exact versions
+CI tests (`uv.lock`):
+
+```bash
+uv sync
+uv run pytest       # the PostgreSQL tests run when TEST_DATABASE_URL is set
+uv run mypy
+uv run slack2rag --check
+```
+
+With pip (25.1 or newer, for `--group`). pip doesn't read `uv.lock`, so it
+may pick newer dependency versions than CI tested:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e . --group dev
+pytest
+mypy
+slack2rag --check
+```
+
+Either way, `uvx pre-commit install` (or `pip install pre-commit &&
+pre-commit install`) runs the lint checks on every commit.
+
+## License
+
+[MIT](LICENSE)

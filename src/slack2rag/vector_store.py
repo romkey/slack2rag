@@ -28,19 +28,26 @@ Collection payload fields
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
-from typing import List, Optional
+from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .embedder import SparseVector
 from .processor import Document
 
 logger = logging.getLogger(__name__)
 
 _CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{8,}$")
+
+# A search hit: the point's payload (the fields listed in the module docstring,
+# plus whatever older indexing runs stored) with its ``score`` added.  Payload
+# values are heterogeneous JSON and qdrant_client types them as Any.
+SearchHit = dict[str, Any]
 
 
 class VectorStore:
@@ -91,7 +98,8 @@ class VectorStore:
 
     def _create_hybrid_collection(self) -> None:
         logger.info(
-            "Creating Qdrant collection %r (dim=%d, cosine, hybrid mode with sparse vectors)",
+            "Creating Qdrant collection %r "
+            "(dim=%d, cosine, hybrid mode with sparse vectors)",
             self._collection,
             self._dimension,
         )
@@ -110,41 +118,44 @@ class VectorStore:
 
     def _ensure_payload_indexes(self) -> None:
         """Create payload indexes if they don't already exist (idempotent)."""
-        for field_name in ("channel_id", "channel_name", "date", "user_id", "doc_type", "source_system"):
-            try:
+        for field_name in (
+            "channel_id",
+            "channel_name",
+            "date",
+            "user_id",
+            "doc_type",
+            "source_system",
+        ):
+            # Creating an index that already exists raises; that's the
+            # expected case on every run after the first.
+            with contextlib.suppress(Exception):
                 self._client.create_payload_index(
                     collection_name=self._collection,
                     field_name=field_name,
                     field_schema=qmodels.PayloadSchemaType.KEYWORD,
                 )
-            except Exception:
-                pass  # already exists
 
         # Full-text index for keyword-based search/filtering
-        try:
+        with contextlib.suppress(Exception):  # already exists
             self._client.create_payload_index(
                 collection_name=self._collection,
                 field_name="text",
                 field_schema=qmodels.TextIndexParams(
-                    type="text",
+                    type=qmodels.TextIndexType.TEXT,
                     tokenizer=qmodels.TokenizerType.WORD,
                     min_token_len=2,
                     max_token_len=40,
                     lowercase=True,
                 ),
             )
-        except Exception:
-            pass  # already exists
 
         # Integer index on reaction_count for quality-weighted retrieval
-        try:
+        with contextlib.suppress(Exception):  # already exists
             self._client.create_payload_index(
                 collection_name=self._collection,
                 field_name="reaction_count",
                 field_schema=qmodels.PayloadSchemaType.INTEGER,
             )
-        except Exception:
-            pass
 
     def _check_dimension(self) -> None:
         """Warn if the existing collection's vector size mismatches the embedder."""
@@ -153,9 +164,13 @@ class VectorStore:
             vec_cfg = info.config.params.vectors
 
             if isinstance(vec_cfg, dict):
-                actual = vec_cfg.get("dense", vec_cfg.get(next(iter(vec_cfg)))).size
+                params = vec_cfg.get("dense", vec_cfg.get(next(iter(vec_cfg))))
             else:
-                actual = vec_cfg.size
+                params = vec_cfg
+            if params is None:
+                logger.debug("Could not verify collection dimension: no vector params")
+                return
+            actual = params.size
 
             if actual != self._dimension:
                 logger.error(
@@ -168,7 +183,8 @@ class VectorStore:
                     self._dimension,
                 )
                 raise RuntimeError(
-                    f"Vector dimension mismatch: collection={actual}, embedder={self._dimension}"
+                    f"Vector dimension mismatch: collection={actual}, "
+                    f"embedder={self._dimension}"
                 )
         except RuntimeError:
             raise
@@ -177,12 +193,14 @@ class VectorStore:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
     def upsert(
         self,
-        documents: List[Document],
-        vectors: List[List[float]],
-        sparse_vectors: Optional[List[dict]] = None,
+        documents: list[Document],
+        vectors: list[list[float]],
+        sparse_vectors: list[SparseVector] | None = None,
     ) -> None:
         """Upsert *documents* with their corresponding *vectors*.
 
@@ -194,7 +212,8 @@ class VectorStore:
 
         points: list[qmodels.PointStruct] = []
 
-        for i, (doc, vec) in enumerate(zip(documents, vectors)):
+        # strict=False: an over-long list is silently truncated, as before.
+        for i, (doc, vec) in enumerate(zip(documents, vectors, strict=False)):
             if self._hybrid and sparse_vectors:
                 sv = sparse_vectors[i]
                 point = qmodels.PointStruct(
@@ -223,14 +242,14 @@ class VectorStore:
 
     def search(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int = 10,
-        channel_filter: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
+        channel_filter: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
         score_threshold: float = 0.0,
-        sparse_vector: Optional[dict] = None,
-    ) -> List[dict]:
+        sparse_vector: SparseVector | None = None,
+    ) -> list[SearchHit]:
         """
         Semantic search.  Returns a list of payload dicts sorted by relevance.
 
@@ -246,21 +265,27 @@ class VectorStore:
 
         if self._hybrid and sparse_vector:
             return self._hybrid_search(
-                query_vector, sparse_vector, limit, query_filter, score_threshold,
+                query_vector,
+                sparse_vector,
+                limit,
+                query_filter,
+                score_threshold,
             )
 
         return self._dense_search(query_vector, limit, query_filter, score_threshold)
 
     def _build_filter(
         self,
-        channel_filter: Optional[str],
-        date_from: Optional[str],
-        date_to: Optional[str],
-    ) -> Optional[qmodels.Filter]:
-        conditions: List[qmodels.Condition] = []
+        channel_filter: str | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> qmodels.Filter | None:
+        conditions: list[qmodels.Condition] = []
 
         if channel_filter:
-            key = "channel_id" if _CHANNEL_ID_RE.match(channel_filter) else "channel_name"
+            key = (
+                "channel_id" if _CHANNEL_ID_RE.match(channel_filter) else "channel_name"
+            )
             conditions.append(
                 qmodels.FieldCondition(
                     key=key,
@@ -269,23 +294,33 @@ class VectorStore:
             )
         if date_from:
             conditions.append(
-                qmodels.FieldCondition(key="date", range=qmodels.Range(gte=date_from))
+                qmodels.FieldCondition(
+                    key="date",
+                    # Known bug, pinned by a strict xfail test: Range is numeric
+                    # and rejects an ISO date string.  Left as-is in a typing pass.
+                    range=qmodels.Range(gte=date_from),  # type: ignore[arg-type]
+                )
             )
         if date_to:
             conditions.append(
-                qmodels.FieldCondition(key="date", range=qmodels.Range(lte=date_to))
+                qmodels.FieldCondition(
+                    key="date",
+                    # Same known bug as date_from above.
+                    range=qmodels.Range(lte=date_to),  # type: ignore[arg-type]
+                )
             )
 
         return qmodels.Filter(must=conditions) if conditions else None
 
     def _dense_search(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int,
-        query_filter: Optional[qmodels.Filter],
+        query_filter: qmodels.Filter | None,
         score_threshold: float,
-    ) -> List[dict]:
-        kwargs: dict = {
+    ) -> list[SearchHit]:
+        # Any: query_points takes keyword arguments of many different types.
+        kwargs: dict[str, Any] = {
             "collection_name": self._collection,
             "query": query_vector,
             "limit": limit,
@@ -297,19 +332,16 @@ class VectorStore:
 
         response = self._client.query_points(**kwargs)
 
-        return [
-            {"score": hit.score, **hit.payload}
-            for hit in response.points
-        ]
+        return [{"score": hit.score, **(hit.payload or {})} for hit in response.points]
 
     def _hybrid_search(
         self,
-        query_vector: List[float],
-        sparse_vector: dict,
+        query_vector: list[float],
+        sparse_vector: SparseVector,
         limit: int,
-        query_filter: Optional[qmodels.Filter],
+        query_filter: qmodels.Filter | None,
         score_threshold: float,
-    ) -> List[dict]:
+    ) -> list[SearchHit]:
         """Dense + sparse retrieval with Reciprocal Rank Fusion."""
         prefetch_limit = max(limit * 3, 20)
 
@@ -318,7 +350,8 @@ class VectorStore:
             values=sparse_vector["values"],
         )
 
-        kwargs: dict = {
+        # Any: query_points takes keyword arguments of many different types.
+        kwargs: dict[str, Any] = {
             "collection_name": self._collection,
             "prefetch": [
                 qmodels.Prefetch(
@@ -343,14 +376,13 @@ class VectorStore:
 
         response = self._client.query_points(**kwargs)
 
-        return [
-            {"score": hit.score, **hit.payload}
-            for hit in response.points
-        ]
+        return [{"score": hit.score, **(hit.payload or {})} for hit in response.points]
 
     def count(self) -> int:
         result = self._client.count(collection_name=self._collection)
-        return getattr(result, "count", None) or getattr(result, "points_count", None) or 0
+        return (
+            getattr(result, "count", None) or getattr(result, "points_count", None) or 0
+        )
 
     def count_by_channel(self, channel_id: str) -> int:
         """Return the number of message points with the given channel_id.
@@ -370,9 +402,15 @@ class VectorStore:
                 must_not=[
                     qmodels.FieldCondition(
                         key="doc_type",
-                        match=qmodels.MatchAny(any=["channel_summary", "workspace_summary",
-                                                      "user_summary", "team_summary",
-                                                      "thread_summary"]),
+                        match=qmodels.MatchAny(
+                            any=[
+                                "channel_summary",
+                                "workspace_summary",
+                                "user_summary",
+                                "team_summary",
+                                "thread_summary",
+                            ]
+                        ),
                     ),
                 ],
             ),

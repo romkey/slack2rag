@@ -7,38 +7,64 @@ Each row stores the full Slack API object as JSONB so no metadata is lost.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Protocol
 
 import psycopg
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
-DDL_STATEMENTS = [
-    """
-    CREATE TABLE IF NOT EXISTS slack_channels (
-        id TEXT PRIMARY KEY,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS slack_users (
-        id TEXT PRIMARY KEY,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS slack_messages (
-        channel_id TEXT NOT NULL REFERENCES slack_channels(id) ON DELETE CASCADE,
-        ts TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (channel_id, ts)
-    )
-    """,
-]
+# A raw Slack Web API JSON object (channel, message, user).  It is stored
+# verbatim as JSONB and its shape varies by object type and workspace, so the
+# values are Any; this module reads only "id", "ts" and "user".
+SlackObject = dict[str, Any]
+
+
+class UserLookup(Protocol):
+    """What persist_channel_messages_and_users needs from the Slack client."""
+
+    def get_user_record(self, user_id: str) -> SlackObject | None: ...
+
+
+class SchemaError(RuntimeError):
+    """The database schema isn't at the revision this version needs."""
+
+
+def _alembic_config(url: str) -> AlembicConfig:
+    """Alembic settings for DATABASE_URL, using the migrations in this package."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", "slack2rag:migrations")
+    # SQLAlchemy picks psycopg 3 only when asked; its default is psycopg2.
+    # set_main_option interpolates %, so a %-encoded password needs %%.
+    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url(url).replace("%", "%%"))
+    return cfg
+
+
+def sqlalchemy_url(url: str) -> str:
+    """postgresql://... (libpq form) to postgresql+psycopg://... for SQLAlchemy."""
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url.removeprefix(prefix)
+    return url
+
+
+def head_revision() -> str:
+    """The newest migration in this package."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", "slack2rag:migrations")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    if head is None:  # pragma: no cover - the package always ships migrations
+        raise SchemaError("no migrations found in slack2rag.migrations")
+    return head
+
+
+def migrate(url: str) -> None:
+    """Bring the database schema up to date (`slack2rag migrate`)."""
+    alembic_command.upgrade(_alembic_config(url), "head")
+    logger.info("PostgreSQL schema is at revision %s", head_revision())
 
 
 class PgStore:
@@ -48,19 +74,31 @@ class PgStore:
         self._conninfo = conninfo
 
     @staticmethod
-    def from_url(url: str) -> Optional["PgStore"]:
-        if not (url or "").strip():
+    def from_url(url: str | None) -> PgStore | None:
+        if url is None or not url.strip():
             return None
         return PgStore(url.strip())
 
-    def init_schema(self) -> None:
+    def schema_revision(self) -> str | None:
+        """The migration the database is at, or None if it has never been migrated."""
         with psycopg.connect(self._conninfo) as conn:
-            for stmt in DDL_STATEMENTS:
-                conn.execute(stmt)
-            conn.commit()
-        logger.info("PostgreSQL schema ready")
+            exists = conn.execute("SELECT to_regclass('alembic_version')").fetchone()
+            if exists is None or exists[0] is None:
+                return None
+            row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            return None if row is None else str(row[0])
 
-    def upsert_channel(self, channel: dict[str, Any]) -> None:
+    def check_schema(self) -> None:
+        """Raise SchemaError unless the schema is at head (`slack2rag migrate`)."""
+        revision = self.schema_revision()
+        head = head_revision()
+        if revision != head:
+            raise SchemaError(
+                f"PostgreSQL schema is at revision {revision or 'none'}, not "
+                f"{head}; run `slack2rag migrate` first"
+            )
+
+    def upsert_channel(self, channel: SlackObject) -> None:
         cid = channel.get("id")
         if not cid:
             logger.warning("upsert_channel: missing id, skipping")
@@ -78,7 +116,7 @@ class PgStore:
             )
             conn.commit()
 
-    def upsert_user(self, user: dict[str, Any]) -> None:
+    def upsert_user(self, user: SlackObject) -> None:
         uid = user.get("id")
         if not uid:
             logger.warning("upsert_user: missing id, skipping")
@@ -96,7 +134,7 @@ class PgStore:
             )
             conn.commit()
 
-    def upsert_message(self, channel_id: str, message: dict[str, Any]) -> None:
+    def upsert_message(self, channel_id: str, message: SlackObject) -> None:
         ts = message.get("ts")
         if not ts:
             logger.warning("upsert_message: missing ts, skipping")
@@ -114,7 +152,7 @@ class PgStore:
             )
             conn.commit()
 
-    def bulk_upsert_users(self, users: list[dict[str, Any]]) -> None:
+    def bulk_upsert_users(self, users: list[SlackObject]) -> None:
         if not users:
             return
         rows = [(u["id"], Jsonb(u)) for u in users if u.get("id")]
@@ -136,10 +174,10 @@ class PgStore:
 
     def persist_channel_messages_and_users(
         self,
-        slack: Any,
-        channel: dict[str, Any],
-        root_msg: dict[str, Any],
-        replies: list[dict[str, Any]],
+        slack: UserLookup,
+        channel: SlackObject,
+        root_msg: SlackObject,
+        replies: list[SlackObject],
     ) -> None:
         """Store channel row, each message JSON, and any referenced users."""
         cid = channel.get("id")
