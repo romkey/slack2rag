@@ -443,6 +443,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     from . import __version__
     logger.info("Starting slack2rag v%s", __version__)
+    for warning in cfg.missing_api_key_warnings():
+        logger.warning(warning)
 
     if args.check:
         ok = _check_llm(cfg)

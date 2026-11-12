@@ -3,6 +3,11 @@ from dataclasses import dataclass
 from typing import List
 
 
+DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+OPENAI_HOST = "api.openai.com"
+
+
 def _bool_env(value: str) -> bool:
     return value.lower() in ("1", "true", "yes")
 
@@ -19,12 +24,12 @@ class Config:
     slack_channels: str = ""  # comma-separated names/IDs; empty = all public
     slack_channel_blacklist: str = ""  # comma-separated names/IDs to skip entirely
 
-    # OpenAI-compatible inference endpoint (works with OpenAI, Ollama's /v1
-    # compatibility layer, llama.cpp server, vLLM, LM Studio, etc.).
-    llm_base_url: str = "http://localhost:11434/v1"
-    llm_api_key: str = ""  # sent as Bearer token; some servers require any non-empty value
+    # Inference endpoint.  Defaults to OpenAI; any OpenAI-compatible server
+    # (Ollama's /v1 layer, llama.cpp server, vLLM, LM Studio, etc.) also works.
+    llm_base_url: str = DEFAULT_LLM_BASE_URL
+    llm_api_key: str = ""  # optional; sent as Bearer token when set (OpenAI requires it)
 
-    embedding_model: str = "nomic-embed-text"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embedding_prefix: str = ""  # optional prefix prepended to each embedding input
     embedding_context_length: int = 8192  # model context window in tokens; 0 = no truncation
 
@@ -68,6 +73,29 @@ class Config:
     def effective_eval_api_key(self) -> str:
         return self.eval_api_key or self.llm_api_key
 
+    def missing_api_key_warnings(self) -> List[str]:
+        """Warnings for OpenAI endpoints configured without an API key.
+
+        The key stays optional so local OpenAI-compatible servers work
+        without one, but OpenAI itself rejects unauthenticated requests.
+        """
+        warnings: List[str] = []
+        if OPENAI_HOST in self.llm_base_url and not self.llm_api_key:
+            warnings.append(
+                f"LLM_BASE_URL is {self.llm_base_url} but LLM_API_KEY is not set; "
+                "OpenAI requests will fail with 401"
+            )
+        if (
+            self.eval_model
+            and OPENAI_HOST in self.effective_eval_base_url
+            and not self.effective_eval_api_key
+        ):
+            warnings.append(
+                f"Evaluator endpoint is {self.effective_eval_base_url} but no "
+                "EVAL_API_KEY or LLM_API_KEY is set; OpenAI requests will fail with 401"
+            )
+        return warnings
+
     @classmethod
     def from_env(cls) -> "Config":
         token = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -80,9 +108,9 @@ class Config:
             database_url=os.environ.get("DATABASE_URL", ""),
             slack_channels=os.environ.get("SLACK_CHANNELS", ""),
             slack_channel_blacklist=os.environ.get("SLACK_CHANNEL_BLACKLIST", ""),
-            llm_base_url=os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1"),
+            llm_base_url=os.environ.get("LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
             llm_api_key=os.environ.get("LLM_API_KEY", ""),
-            embedding_model=os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"),
+            embedding_model=os.environ.get("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
             embedding_prefix=os.environ.get("EMBEDDING_PREFIX", ""),
             embedding_context_length=int(os.environ.get("EMBEDDING_CONTEXT_LENGTH", "8192")),
             sync_interval_minutes=int(os.environ.get("SYNC_INTERVAL_MINUTES", "60")),

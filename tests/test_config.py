@@ -59,3 +59,37 @@ def test_eval_endpoint_overrides_llm_endpoint(monkeypatch) -> None:
     cfg = Config.from_env()
     assert cfg.effective_eval_base_url == "https://api.openai.com/v1"
     assert cfg.effective_eval_api_key == "sk-cloud"
+
+
+def test_llm_defaults_to_openai(monkeypatch) -> None:
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    for var in ("LLM_BASE_URL", "LLM_API_KEY", "EMBEDDING_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = Config.from_env()
+    assert cfg.llm_base_url == "https://api.openai.com/v1"
+    assert cfg.embedding_model == "text-embedding-3-small"
+    assert cfg.llm_api_key == ""
+
+
+def test_missing_api_key_warns_for_openai() -> None:
+    cfg = Config(slack_bot_token="xoxb-test")
+    assert len(cfg.missing_api_key_warnings()) == 1
+    cfg.eval_model = "gpt-4o-mini"
+    assert len(cfg.missing_api_key_warnings()) == 2
+
+
+def test_no_api_key_warning_when_key_set_or_local() -> None:
+    assert Config(slack_bot_token="x", llm_api_key="sk-x", eval_model="m").missing_api_key_warnings() == []
+    local = Config(slack_bot_token="x", llm_base_url="http://ollama:11434/v1", eval_model="m")
+    assert local.missing_api_key_warnings() == []
+
+
+def test_eval_key_warning_respects_separate_eval_endpoint() -> None:
+    cfg = Config(
+        slack_bot_token="x",
+        llm_base_url="http://ollama:11434/v1",
+        eval_model="gpt-4o-mini",
+        eval_base_url="https://api.openai.com/v1",
+    )
+    warnings = cfg.missing_api_key_warnings()
+    assert len(warnings) == 1 and "Evaluator" in warnings[0]

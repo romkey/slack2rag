@@ -1,11 +1,11 @@
 # slack2rag
 
-Indexes Slack public-channel messages into a [Qdrant](https://qdrant.tech/) vector database for use with Retrieval-Augmented Generation (RAG).  Embeddings (and the optional message-quality evaluator) are generated through any **OpenAI-compatible** inference endpoint — OpenAI itself, [Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio, etc.
+Indexes Slack public-channel messages into a [Qdrant](https://qdrant.tech/) vector database for use with Retrieval-Augmented Generation (RAG).  Embeddings (and the optional message-quality evaluator) are generated through the **OpenAI API** by default.  Any OpenAI-compatible endpoint — [Ollama](https://ollama.com/) (`/v1`), llama.cpp's server, vLLM, LM Studio, etc. — works too.
 
 ```
 Slack API  →  slack2rag  →  Qdrant
                   ↕
-       OpenAI-compatible LLM
+   OpenAI (or compatible) API
                   ↑
     any app can query the Qdrant REST API
 ```
@@ -16,8 +16,8 @@ Slack API  →  slack2rag  →  Qdrant
 
 * Docker + Docker Compose
 * A Slack app with a **Bot Token** (`xoxb-…`)
-* An OpenAI-compatible inference endpoint with an embedding model available
-  (the bundled `docker-compose.yml` ships an Ollama service for this)
+* An OpenAI API key — or any OpenAI-compatible inference endpoint with an
+  embedding model (the bundled `docker-compose.yml` has an optional Ollama service)
 
 ### Slack app setup
 
@@ -41,18 +41,32 @@ Slack API  →  slack2rag  →  Qdrant
 
 ```bash
 cp .env.example .env
-# Edit .env and set SLACK_BOT_TOKEN
+# Edit .env and set SLACK_BOT_TOKEN and LLM_API_KEY
 
-# Start Qdrant, Ollama, and slack2rag
+# Start Qdrant and slack2rag
 docker compose up --build -d
-
-# Pull the embedding model (first time only)
-docker compose exec ollama ollama pull nomic-embed-text
 ```
 
 The first sync indexes all accessible public channels.  Subsequent runs are incremental.
 
-> If you already have Ollama running on the host, comment out the `ollama` service in `docker-compose.yml` and set `LLM_BASE_URL=http://host.docker.internal:11434/v1` in `.env`.  To use OpenAI (or another OpenAI-compatible provider) instead, set `LLM_BASE_URL=https://api.openai.com/v1` and `LLM_API_KEY=sk-…`.
+### Running models locally with Ollama
+
+To skip OpenAI and run embeddings locally, set these in `.env`:
+
+```bash
+LLM_BASE_URL=http://ollama:11434/v1
+LLM_API_KEY=
+EMBEDDING_MODEL=nomic-embed-text
+```
+
+then start the bundled Ollama service and pull the model:
+
+```bash
+docker compose --profile ollama up --build -d
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+If Ollama is already running on the host, skip the profile and use `LLM_BASE_URL=http://host.docker.internal:11434/v1` instead.
 
 ### Verifying connectivity
 
@@ -95,9 +109,9 @@ All configuration is via environment variables (or `.env`).
 | `SLACK_CHANNELS` | *(empty)* | Comma-separated channel names/IDs to index.  Empty = all public channels |
 | `QDRANT_URL` | `http://qdrant:6333` | Qdrant REST endpoint |
 | `QDRANT_COLLECTION` | `slack_messages` | Collection name |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL.  `/embeddings` and `/chat/completions` are appended automatically |
-| `LLM_API_KEY` | *(empty)* | Bearer token for the LLM endpoint.  Required for OpenAI; optional for most local servers |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Model name for embeddings (must exist on the LLM server) |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI (or OpenAI-compatible) base URL.  `/embeddings` and `/chat/completions` are appended automatically |
+| `LLM_API_KEY` | *(empty)* | Optional Bearer token for the LLM endpoint.  Required for OpenAI (a warning is logged at startup if it is missing); leave empty for most local servers |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Model name for embeddings (must exist on the LLM server) |
 | `EMBEDDING_PREFIX` | *(empty)* | Optional prefix prepended to every embedding input, e.g. `search_document:` |
 | `EMBEDDING_CONTEXT_LENGTH` | `8192` | Max tokens per embedding input.  Texts are truncated at a word boundary.  `0` disables truncation |
 | `SYNC_INTERVAL_MINUTES` | `60` | Minutes between syncs |
@@ -130,13 +144,13 @@ Any embedding model your inference server exposes will work.  For Ollama, pull i
 
 | Model | Dims | Notes |
 |---|---|---|
-| `nomic-embed-text` (default) | 768 | Strong general-purpose Ollama model (recommended for local) |
+| `text-embedding-3-small` (default) | 1536 | OpenAI, fast and cheap |
+| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
+| `nomic-embed-text` | 768 | Strong general-purpose Ollama model (recommended for local) |
 | `mxbai-embed-large` | 1024 | High quality (Ollama) |
 | `all-minilm` | 384 | Lightweight (Ollama) |
-| `text-embedding-3-small` | 1536 | OpenAI, fast and cheap |
-| `text-embedding-3-large` | 3072 | OpenAI, highest quality |
 
-> **Note:** Changing the embedding model requires deleting the Qdrant collection and re-indexing (the vector dimensions change).
+> **Note:** Changing the embedding model requires deleting the Qdrant collection and re-indexing (the vector dimensions change).  Existing installs that relied on the old Ollama defaults should set `LLM_BASE_URL` and `EMBEDDING_MODEL=nomic-embed-text` explicitly to keep their collection.
 
 ### Hybrid search
 
@@ -190,13 +204,14 @@ Qdrant exposes a REST API on port **6333** (and gRPC on 6334).
 ### Python (qdrant-client)
 
 ```python
-import json, urllib.request
+import json, os, urllib.request
 from qdrant_client import QdrantClient
 
-# Get embedding from any OpenAI-compatible endpoint (Ollama's /v1 shown here)
-payload = json.dumps({"model": "nomic-embed-text", "input": ["how do I set up SSO?"]}).encode()
-req = urllib.request.Request("http://localhost:11434/v1/embeddings",
-                             data=payload, headers={"Content-Type": "application/json"})
+# Get an embedding from OpenAI (use the same model the index was built with)
+payload = json.dumps({"model": "text-embedding-3-small", "input": ["how do I set up SSO?"]}).encode()
+req = urllib.request.Request("https://api.openai.com/v1/embeddings", data=payload,
+                             headers={"Content-Type": "application/json",
+                                      "Authorization": f"Bearer {os.environ['LLM_API_KEY']}"})
 with urllib.request.urlopen(req) as resp:
     vector = json.loads(resp.read())["data"][0]["embedding"]
 
@@ -292,7 +307,7 @@ Each stored point carries this payload:
 ```
 docker-compose.yml
 ├── qdrant          — vector DB, persistent volume, REST API on :6333
-├── ollama          — OpenAI-compatible LLM server on :11434 (optional; swap for any OpenAI-compatible endpoint)
+├── ollama          — optional local OpenAI-compatible LLM server on :11434 (`--profile ollama`)
 └── slack2rag
     ├── slack_client.py   — Slack Web API (pagination, rate-limit retries)
     ├── processor.py      — message → Document (thread grouping, chunking)
