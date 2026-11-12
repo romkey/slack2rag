@@ -1,8 +1,8 @@
 # Development: runs the indexer from your working tree, with the dev
-# dependencies installed, plus Qdrant and PostgreSQL. Embeddings come from
-# OpenAI unless you add the ollama profile (see docker-compose.prod.yaml).
+# dependencies installed, plus Qdrant, PostgreSQL and a local embedding
+# server (see docker-compose.prod.yaml for using another provider).
 #
-#   cp .env.example .env              # then set SLACK_BOT_TOKEN, LLM_API_KEY
+#   cp .env.example .env              # then set SLACK_BOT_TOKEN
 #   docker compose up --build
 #   docker compose run --rm app slack2rag query "deploy process"
 #   docker compose run --rm app bash  # a shell with everything installed
@@ -27,12 +27,15 @@ services:
         required: false
     environment:
       QDRANT_URL: http://qdrant:6333
-      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-https://api.openai.com/v1}  # see docker-compose.prod.yaml
+      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-http://embeddings/v1}  # see docker-compose.prod.yaml
       DATABASE_URL: postgresql://slack2rag:slack2rag@db:5432/slack2rag  # not-a-secret
       STATE_FILE: /data/state.json
     depends_on:
       qdrant:
         condition: service_healthy
+      embeddings:
+        condition: service_healthy
+        required: false
       ollama:
         condition: service_started
         required: false
@@ -55,6 +58,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  embeddings:  # see docker-compose.prod.yaml
+    image: ghcr.io/huggingface/text-embeddings-inference:${TEI_IMAGE_TAG:-cpu-1.9.4}
+    environment:
+      MODEL_ID: ${EMBEDDING_MODEL:-nomic-ai/modernbert-embed-base}
+      MAX_CLIENT_BATCH_SIZE: "128"
+      MAX_BATCH_TOKENS: ${EMBEDDING_CONTEXT_LENGTH:-2048}
+      AUTO_TRUNCATE: "true"
+    ports:
+      - "8080:80"   # OpenAI-compatible API, for running slack2rag on the host
+    volumes:
+      - dev-embeddings:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
 
   ollama:
     image: ollama/ollama:0.40.16
@@ -84,5 +104,6 @@ volumes:
   uv-cache:
   dev-state:
   dev-qdrant:
+  dev-embeddings:
   dev-ollama:
   dev-db:

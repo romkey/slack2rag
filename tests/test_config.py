@@ -21,11 +21,13 @@ def test_database_url_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.database_url == ""
 
 
-def test_embedding_prefix_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_prefixes_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-    monkeypatch.setenv("EMBEDDING_PREFIX", "search_document:")
+    monkeypatch.setenv("EMBEDDING_QUERY_PREFIX", "query: ")
+    monkeypatch.setenv("EMBEDDING_DOCUMENT_PREFIX", "passage: ")
     cfg = Config.from_env()
-    assert cfg.embedding_prefix == "search_document:"
+    assert cfg.embedding_query_prefix == "query: "
+    assert cfg.embedding_document_prefix == "passage: "
 
 
 def test_llm_base_url_and_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

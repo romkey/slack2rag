@@ -18,6 +18,8 @@ _ALL_VARS = (
     "LLM_API_KEY",
     "EMBEDDING_MODEL",
     "EMBEDDING_PREFIX",
+    "EMBEDDING_QUERY_PREFIX",
+    "EMBEDDING_DOCUMENT_PREFIX",
     "EMBEDDING_CONTEXT_LENGTH",
     "SYNC_INTERVAL_MINUTES",
     "RUN_ONCE",
@@ -231,15 +233,32 @@ def test_eval_test_false_strings_disable(
     assert Config.from_env().eval_test is False
 
 
-def test_llm_defaults_to_openai(clean_env: pytest.MonkeyPatch) -> None:
+def test_defaults_to_local_modernbert(clean_env: pytest.MonkeyPatch) -> None:
     cfg = Config.from_env()
-    assert cfg.llm_base_url == "https://api.openai.com/v1"
-    assert cfg.embedding_model == "text-embedding-3-small"
+    assert cfg.llm_base_url == "http://localhost:8080/v1"
+    assert cfg.embedding_model == "nomic-ai/modernbert-embed-base"
+    assert cfg.embedding_query_prefix == "search_query: "
+    assert cfg.embedding_document_prefix == "search_document: "
     assert cfg.llm_api_key == ""
+    assert cfg.missing_api_key_warnings() == []
+
+
+def test_empty_prefixes_override_defaults(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("EMBEDDING_QUERY_PREFIX", "")
+    clean_env.setenv("EMBEDDING_DOCUMENT_PREFIX", "")
+    cfg = Config.from_env()
+    assert cfg.embedding_query_prefix == ""
+    assert cfg.embedding_document_prefix == ""
+
+
+def test_old_embedding_prefix_is_refused(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("EMBEDDING_PREFIX", "search_document: ")
+    with pytest.raises(ConfigError, match="EMBEDDING_QUERY_PREFIX"):
+        Config.from_env()
 
 
 def _openai_cfg(
-    llm_base_url: str = Config.llm_base_url,
+    llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
     eval_model: str = "",
     eval_base_url: str = "",

@@ -3,10 +3,17 @@ Generates dense vector embeddings via an OpenAI-compatible inference
 endpoint, with optional sparse encoding for hybrid search.
 
 Dense embeddings:
-  POST {base_url}/embeddings — works with OpenAI itself, Ollama's /v1
-  compatibility layer, llama.cpp's server, vLLM, LM Studio, and any
-  other OpenAI-compatible provider.  No PyTorch or heavy ML libraries
-  needed in this process.
+  POST {base_url}/embeddings — works with Hugging Face Text Embeddings
+  Inference, OpenAI itself, Ollama's /v1 compatibility layer, llama.cpp's
+  server, vLLM, LM Studio, and any other OpenAI-compatible provider.  No
+  PyTorch or heavy ML libraries needed in this process.
+
+  Many embedding models are trained with a prompt in front of each input,
+  different for search queries and for the documents being searched
+  (nomic: "search_query: " / "search_document: ", e5: "query: " /
+  "passage: ").  embed() takes kind="query" or kind="document" and puts
+  the matching prefix in front of each text before truncation, so the
+  prefix counts toward the context limit.
 
 Sparse encoding:
   A lightweight BM25-like tokenizer that maps terms to hashed bucket
@@ -25,9 +32,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 logger = logging.getLogger(__name__)
+
+EmbedKind = Literal["query", "document"]
 
 
 class EmbeddingError(RuntimeError):
@@ -210,7 +219,8 @@ class Embedder:
         model: str,
         context_length: int = 0,
         api_key: str = "",
-        input_prefix: str = "",
+        query_prefix: str = "",
+        document_prefix: str = "",
         request_batch_size: int = 50,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -222,7 +232,10 @@ class Embedder:
             )
         self._model = model
         self._api_key = api_key
-        self._input_prefix = input_prefix
+        self._prefixes: dict[EmbedKind, str] = {
+            "query": query_prefix,
+            "document": document_prefix,
+        }
         self._max_chars = context_length * 3 if context_length > 0 else 0
         self._request_batch_size = max(1, request_batch_size)
         # Servers known to mishandle array inputs flip this to True after
@@ -232,8 +245,9 @@ class Embedder:
         logger.info(
             "Connecting to LLM at %s  embedding model: %s", self._base_url, model
         )
-        if self._input_prefix:
-            logger.info("  embedding input prefix: %r", self._input_prefix)
+        for kind, prefix in self._prefixes.items():
+            if prefix:
+                logger.info("  %s prefix: %r", kind, prefix)
         if self._max_chars:
             logger.info(
                 "  context limit: %d tokens (~%d chars)",
@@ -241,7 +255,7 @@ class Embedder:
                 self._max_chars,
             )
         try:
-            probe = self._call_api(self._prepare_texts(["dimension probe"]))
+            probe = self._call_api(self._prepare_texts(["dimension probe"], "document"))
         except EmbeddingError:
             raise
         except Exception as exc:
@@ -258,17 +272,21 @@ class Embedder:
 
     # ── public entry point ─────────────────────────────────────────────────
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(
+        self, texts: list[str], *, kind: EmbedKind = "document"
+    ) -> list[list[float]]:
         """Return a list of float vectors, one per input text.
 
-        Pre-truncates texts to the configured context limit, and
-        automatically retries with shorter input if the server still
-        rejects any text for exceeding its context window.
+        kind picks the prefix: "document" for text being indexed, "query"
+        for search queries.  Pre-truncates texts (prefix included) to the
+        configured context limit, and automatically retries with shorter
+        input if the server still rejects any text for exceeding its
+        context window.
         """
         if not texts:
             return []
 
-        texts = self._prepare_texts(texts)
+        texts = self._prepare_texts(texts, kind)
 
         try:
             return self._call_api(texts)
@@ -282,10 +300,15 @@ class Embedder:
 
     # ── internals ──────────────────────────────────────────────────────────
 
-    def _prepare_texts(self, texts: list[str]) -> list[str]:
-        """Apply model-specific input formatting and context truncation."""
-        if self._input_prefix:
-            texts = [f"{self._input_prefix}{text}" for text in texts]
+    def _prepare_texts(self, texts: list[str], kind: EmbedKind) -> list[str]:
+        """Add the query or document prefix, then truncate to the context limit.
+
+        Truncation cuts from the end, so the prefix is always kept and its
+        length counts toward the limit.
+        """
+        prefix = self._prefixes[kind]
+        if prefix:
+            texts = [f"{prefix}{text}" for text in texts]
         if self._max_chars:
             texts = [_truncate_at_word(t, self._max_chars) for t in texts]
         return texts

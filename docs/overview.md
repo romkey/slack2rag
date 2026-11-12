@@ -11,7 +11,7 @@
 - `src/slack2rag/config.py`: frozen `Config` from environment variables; `ConfigError`.
 - `src/slack2rag/slack_client.py`: Slack API wrapper (pagination, auto-join, user cache).
 - `src/slack2rag/processor.py`: messages → `Document`s, chunking, channel/user/team summaries.
-- `src/slack2rag/embedder.py`: `/embeddings` client with context-length fallback; `SparseEncoder`.
+- `src/slack2rag/embedder.py`: `/embeddings` client with query/document prefixes and context-length fallback; `SparseEncoder`.
 - `src/slack2rag/vector_store.py`: Qdrant collection, upsert, (hybrid) search.
 - `src/slack2rag/evaluator.py`: eval mode, scoring with `/chat/completions`.
 - `src/slack2rag/pg_store.py`: optional PostgreSQL JSONB store; `migrate`, `check_schema`.
@@ -20,7 +20,7 @@
 - `src/slack2rag/query.py`: `slack2rag query` search output.
 - `tests/`: pytest; one file per module, `*_extra.py`/`*_unit.py` for more cases. `test_pg_store.py` needs `TEST_DATABASE_URL`.
 - `Dockerfile`: `dev` and `production` stages; `/data` and `/results` writable by uid 10001.
-- `docker-compose.yaml` (dev: app, qdrant, db; `ollama` profile adds ollama), `.test` (test, db), `.lint`, `.prod` (app, qdrant; `ollama` profile adds ollama, `postgres` profile adds migrate, db).
+- `docker-compose.yaml` (dev: app, qdrant, embeddings, db; `ollama` profile adds ollama), `.test` (test, db), `.lint`, `.prod` (app, qdrant, embeddings; `ollama` profile adds ollama, `postgres` profile adds migrate, db). `embeddings` is Hugging Face TEI serving `EMBEDDING_MODEL`.
 
 ## Conventions
 

@@ -1,6 +1,7 @@
-# Production: runs the released image from ghcr.io with Qdrant. Embeddings
-# come from OpenAI by default (set LLM_API_KEY). Configure it in .env next
-# to this file (see .env.example and docs/configuration.md).
+# Production: runs the released image from ghcr.io with Qdrant and a local
+# embedding server (Hugging Face Text Embeddings Inference, ModernBERT by
+# default). Configure it in .env next to this file (see .env.example and
+# docs/configuration.md).
 #
 #   docker compose -f docker-compose.prod.yaml up -d
 #   APP_VERSION=1.2.3 docker compose -f docker-compose.prod.yaml up -d   # pin a release
@@ -9,10 +10,13 @@
 # Search the index:
 #   docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "deploy process"
 #
-# Optional local Ollama instead of OpenAI: in .env set
-# CONTAINER_LLM_BASE_URL=http://ollama:11434/v1, EMBEDDING_MODEL=nomic-embed-text
-# and COMPOSE_PROFILES=ollama (comma-separate it with other profiles), then
-#   docker compose -f docker-compose.prod.yaml exec ollama ollama pull nomic-embed-text
+# To use a remote provider such as OpenAI instead, set CONTAINER_LLM_BASE_URL,
+# LLM_API_KEY, EMBEDDING_MODEL and the EMBEDDING_*_PREFIX settings in .env and
+# leave out the local server: up -d --scale embeddings=0.
+#
+# Optional Ollama (for example for the evaluator's chat model): set
+# COMPOSE_PROFILES=ollama (comma-separate it with other profiles) and point
+# EVAL_BASE_URL or CONTAINER_LLM_BASE_URL at http://ollama:11434/v1.
 #
 # Optional PostgreSQL copy of the raw Slack data: set POSTGRES_* and
 # DATABASE_URL (host db) in .env, then add --profile postgres to every
@@ -33,14 +37,17 @@ services:
         required: false
     environment:
       QDRANT_URL: http://qdrant:6333
-      # OpenAI, unless .env sets CONTAINER_LLM_BASE_URL. A separate name,
-      # so a host-only LLM_BASE_URL (localhost) in .env can't point the
-      # container at itself.
-      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-https://api.openai.com/v1}
+      # The bundled embeddings service, unless .env sets
+      # CONTAINER_LLM_BASE_URL. A separate name, so a host-only LLM_BASE_URL
+      # (localhost) in .env can't point the container at itself.
+      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-http://embeddings/v1}
       STATE_FILE: /data/state.json
     depends_on:
       qdrant:
         condition: service_healthy
+      embeddings:
+        condition: service_healthy
+        required: false
       ollama:
         condition: service_started
         required: false
@@ -74,8 +81,30 @@ services:
       timeout: 5s
       retries: 5
 
-  # Optional local embeddings (and evaluator chat model) via Ollama's
-  # OpenAI-compatible /v1 API, instead of OpenAI. See the top of this file.
+  # Local embeddings: Hugging Face Text Embeddings Inference, serving
+  # EMBEDDING_MODEL over its OpenAI-compatible /v1 API. It downloads the
+  # model on first start. On ARM hosts (Apple silicon, Graviton) set
+  # TEI_IMAGE_TAG=cpu-arm64-1.9.4 in .env.
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:${TEI_IMAGE_TAG:-cpu-1.9.4}
+    restart: unless-stopped
+    environment:
+      MODEL_ID: ${EMBEDDING_MODEL:-nomic-ai/modernbert-embed-base}
+      MAX_CLIENT_BATCH_SIZE: "128"  # above slack2rag's BATCH_SIZE (50)
+      # Longest input, in tokens; longer ones are truncated. Higher values
+      # need much more memory on CPU (8192 needs over 8 GB).
+      MAX_BATCH_TOKENS: ${EMBEDDING_CONTEXT_LENGTH:-2048}
+      AUTO_TRUNCATE: "true"
+    volumes:
+      - embeddings_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60  # first start downloads the model
+
+  # Optional Ollama, via its OpenAI-compatible /v1 API. See the top of
+  # this file.
   ollama:
     image: ollama/ollama:0.40.16
     profiles: [ollama]
@@ -121,5 +150,6 @@ volumes:
   slack2rag_state:
   slack2rag_results:
   qdrant_data:
+  embeddings_data:
   ollama_data:
   postgres18_data:

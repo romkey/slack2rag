@@ -26,16 +26,25 @@ the app with a message naming the variable.
 | `QDRANT_URL` | `http://qdrant:6333` | Qdrant REST endpoint. The compose files set it |
 | `QDRANT_COLLECTION` | `slack_messages` | Collection name |
 
-## Embeddings (OpenAI, or any OpenAI-compatible endpoint)
+## Embeddings (any OpenAI-compatible endpoint)
+
+slack2rag sends `POST {LLM_BASE_URL}/embeddings` requests in the OpenAI
+format. By default the server is a local
+[Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
+(TEI), which the compose files run as the `embeddings` service, serving
+ModernBERT. `.env.example` has a table of common models with their
+dimensions, context lengths and prompts.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL; `/embeddings` and `/chat/completions` are appended. The compose files ignore it; see `CONTAINER_LLM_BASE_URL` |
-| `CONTAINER_LLM_BASE_URL` | `https://api.openai.com/v1` | Compose files only: the `LLM_BASE_URL` they give the app container. Its own name, so a host-only `LLM_BASE_URL` in `.env` doesn't leak into the container. `http://ollama:11434/v1` for the bundled Ollama (`COMPOSE_PROFILES=ollama`) |
+| `LLM_BASE_URL` | `http://localhost:8080/v1` | Base URL; `/embeddings` and `/chat/completions` are appended. The compose files ignore it; see `CONTAINER_LLM_BASE_URL` |
+| `CONTAINER_LLM_BASE_URL` | `http://embeddings/v1` | Compose files only: the `LLM_BASE_URL` they give the app container. Its own name, so a host-only `LLM_BASE_URL` in `.env` doesn't leak into the container. `https://api.openai.com/v1` for OpenAI, `http://ollama:11434/v1` for the bundled Ollama (`COMPOSE_PROFILES=ollama`) |
+| `TEI_IMAGE_TAG` | `cpu-1.9.4` | Compose files only: the TEI image tag for the `embeddings` service. `cpu-arm64-1.9.4` on ARM hosts (Apple silicon) |
 | `LLM_API_KEY` | *(empty)* | Optional; sent as a Bearer token when set. Required by OpenAI (a warning is logged at startup if it is missing); most local servers ignore it |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model name on that server. Changing it needs a fresh collection |
-| `EMBEDDING_PREFIX` | *(empty)* | Text put before every embedding input, for models that need a task prefix (`search_document: `) |
-| `EMBEDDING_CONTEXT_LENGTH` | `8192` | The model's context window in tokens, ≥ 0. Longer texts are truncated at a word boundary; 0 disables truncation |
+| `EMBEDDING_MODEL` | `nomic-ai/modernbert-embed-base` | Embedding model name on that server; the compose files' `embeddings` service also downloads and serves it. Changing it needs a fresh collection |
+| `EMBEDDING_QUERY_PREFIX` | `search_query: ` | Put before search queries (`slack2rag query`). Must match the model; `""` for models without prompts, such as OpenAI's |
+| `EMBEDDING_DOCUMENT_PREFIX` | `search_document: ` | Put before every message and thread being indexed. Must match the model; changing it needs a fresh collection |
+| `EMBEDDING_CONTEXT_LENGTH` | `2048` | Longest input in tokens, ≥ 0, at most the model's context. Longer texts, prefix included, are truncated at a word boundary; 0 disables truncation. The compose files' `embeddings` service uses it as its own limit; on CPU, values past about 2048 need several GB of memory |
 | `BATCH_SIZE` | `50` | Messages embedded per request, ≥ 1 |
 
 ## What gets indexed
