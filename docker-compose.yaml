@@ -72,7 +72,7 @@ services:
     environment:
       MODEL_ID: ${EMBEDDING_MODEL:-nomic-ai/modernbert-embed-base}
       MAX_CLIENT_BATCH_SIZE: "128"
-      MAX_BATCH_TOKENS: ${EMBEDDING_CONTEXT_LENGTH:-2048}
+      MAX_BATCH_TOKENS: ${TEI_MAX_BATCH_TOKENS:-2048}
       AUTO_TRUNCATE: "true"
     ports:
       - "8080:80"   # OpenAI-compatible API, for running slack2rag on the host

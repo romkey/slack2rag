@@ -47,6 +47,9 @@ before this one have no changelog entries.
   `COMPOSE_PROFILES=ollama`, `CONTAINER_LLM_BASE_URL=http://ollama:11434/v1`,
   `EMBEDDING_MODEL=nomic-embed-text` and the two prefixes below in `.env`;
   otherwise delete the Qdrant collection and re-index.
+- `EMBEDDING_CONTEXT_LENGTH` now defaults to 2048 (was 8192). The bundled
+  embeddings service has its own limit, `TEI_MAX_BATCH_TOKENS` (default
+  2048), so an 8192 left in `.env` doesn't exhaust its memory.
 - `EMBEDDING_PREFIX` is replaced by `EMBEDDING_QUERY_PREFIX` and
   `EMBEDDING_DOCUMENT_PREFIX` (defaults `search_query: ` and
   `search_document: `, ModernBERT's prompts). Setting the old variable stops

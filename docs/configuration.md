@@ -44,7 +44,8 @@ dimensions, context lengths and prompts.
 | `EMBEDDING_MODEL` | `nomic-ai/modernbert-embed-base` | Embedding model name on that server; the compose files' `embeddings` service also downloads and serves it. Changing it needs a fresh collection |
 | `EMBEDDING_QUERY_PREFIX` | `search_query: ` | Put before search queries (`slack2rag query`). Must match the model; `""` for models without prompts, such as OpenAI's |
 | `EMBEDDING_DOCUMENT_PREFIX` | `search_document: ` | Put before every message and thread being indexed. Must match the model; changing it needs a fresh collection |
-| `EMBEDDING_CONTEXT_LENGTH` | `2048` | Longest input in tokens, ≥ 0, at most the model's context. Longer texts, prefix included, are truncated at a word boundary; 0 disables truncation. The compose files' `embeddings` service uses it as its own limit; on CPU, values past about 2048 need several GB of memory |
+| `EMBEDDING_CONTEXT_LENGTH` | `2048` | Longest input in tokens, ≥ 0, at most the model's context. Longer texts, prefix included, are truncated at a word boundary; 0 disables truncation. |
+| `TEI_MAX_BATCH_TOKENS` | `2048` | Compose files only: the `embeddings` service's own input limit in tokens (TEI's `MAX_BATCH_TOKENS`); longer inputs are truncated. On CPU, values past about 2048 need several GB of memory and the server is killed at startup |
 | `BATCH_SIZE` | `50` | Messages embedded per request, ≥ 1 |
 
 ## What gets indexed

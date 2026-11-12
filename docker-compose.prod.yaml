@@ -100,8 +100,10 @@ services:
       MODEL_ID: ${EMBEDDING_MODEL:-nomic-ai/modernbert-embed-base}
       MAX_CLIENT_BATCH_SIZE: "128"  # above slack2rag's BATCH_SIZE (50)
       # Longest input, in tokens; longer ones are truncated. Higher values
-      # need much more memory on CPU (8192 needs over 8 GB).
-      MAX_BATCH_TOKENS: ${EMBEDDING_CONTEXT_LENGTH:-2048}
+      # need much more memory on CPU (8192 needs over 8 GB). Its own
+      # setting, so an EMBEDDING_CONTEXT_LENGTH=8192 left in an older .env
+      # can't get the server killed for lack of memory.
+      MAX_BATCH_TOKENS: ${TEI_MAX_BATCH_TOKENS:-2048}
       AUTO_TRUNCATE: "true"
     volumes:
       - embeddings_data:/data
