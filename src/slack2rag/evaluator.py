@@ -2,21 +2,25 @@
 Message quality evaluator using an OpenAI-compatible chat-completions LLM.
 
 Sends each Slack message along with a user-supplied prompt to an LLM and
-expects a JSON response with ``score`` (1–10) and ``reason``.  Messages
+expects a JSON response with ``score`` (1-10) and ``reason``.  Messages
 scoring >= 7 are written to /results/good.txt; the rest go to
 /results/bad.txt.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
-import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from pathlib import Path
+from typing import Any
 
 from .pg_store import PgStore
+from .slack_client import SlackClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,11 @@ def _chat_completion(
     Returns None on any HTTP/transport error (already logged).
     """
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    # urlopen also accepts file: and other schemes; only HTTP(S) makes sense
+    # for a chat-completions API, so refuse anything else before sending.
+    if urllib.parse.urlsplit(endpoint).scheme not in ("http", "https"):
+        logger.error("LLM base URL must start with http:// or https://: %r", base_url)
+        return None
     payload = json.dumps(
         {
             "model": model,
@@ -50,17 +59,20 @@ def _chat_completion(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+    # S310 below: the URL is the operator's configured LLM base URL, and the
+    # check above has already refused any scheme other than http/https.
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)  # noqa: S310
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            # Decoded JSON from the LLM server: shape is checked below.
+            data: Any = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         body = ""
-        try:
+        # The error body is only extra detail for the log; any failure
+        # reading it must not mask the HTTP error itself.
+        with contextlib.suppress(Exception):
             body = exc.read().decode(errors="replace").strip()
-        except Exception:
-            pass
         logger.error(
             "LLM returned HTTP %d for %s (model %r): %s",
             exc.code,
@@ -74,7 +86,7 @@ def _chat_completion(
         return None
 
     try:
-        return data["choices"][0]["message"]["content"]
+        content: str = data["choices"][0]["message"]["content"]
     except KeyError, IndexError, TypeError:
         logger.error(
             "Unexpected chat-completions response shape from %s: %s",
@@ -82,6 +94,7 @@ def _chat_completion(
             json.dumps(data)[:300],
         )
         return None
+    return content
 
 
 def score_message(
@@ -154,15 +167,17 @@ def run_eval(
     base_url: str,
     model: str,
     prompt: str,
-    channels: list[dict],
-    slack,
+    # Raw Slack channel objects (JSON with heterogeneous values).
+    channels: list[dict[str, Any]],
+    slack: SlackClient,
     api_key: str = "",
     pg: PgStore | None = None,
 ) -> None:
     """Score every message in every channel and write results to files."""
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    good_path = os.path.join(RESULTS_DIR, "good.txt")
-    bad_path = os.path.join(RESULTS_DIR, "bad.txt")
+    results_dir = Path(RESULTS_DIR)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    good_path = results_dir / "good.txt"
+    bad_path = results_dir / "bad.txt"
 
     logger.info("Eval mode: scoring messages with model %r at %s", model, base_url)
     logger.info("  Prompt: %.200s", prompt)
@@ -179,7 +194,7 @@ def run_eval(
     bad_count = 0
     errors = 0
 
-    with open(good_path, "w") as good_f, open(bad_path, "w") as bad_f:
+    with good_path.open("w") as good_f, bad_path.open("w") as bad_f:
         for ch in channels:
             channel_id = ch["id"]
             channel_name = ch.get("name", channel_id)

@@ -2,10 +2,12 @@
 slack2rag query CLI
 
 Usage (inside Docker):
-  docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "how do I set up SSO?"
+  docker compose -f docker-compose.prod.yaml run --rm app \\
+      slack2rag query "how do I set up SSO?"
 
 Usage (local, against a running Qdrant):
-  QDRANT_URL=http://localhost:6333 slack2rag query --limit 10 --channel engineering "deploy process"
+  QDRANT_URL=http://localhost:6333 \\
+      slack2rag query --limit 10 --channel engineering "deploy process"
 """
 
 import argparse
@@ -14,7 +16,7 @@ import textwrap
 
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder
-from .vector_store import VectorStore
+from .vector_store import SearchHit, VectorStore
 
 _SCORE_BAR_WIDTH = 20
 
@@ -25,7 +27,7 @@ def _score_bar(score: float) -> str:
     return "█" * filled + "░" * (_SCORE_BAR_WIDTH - filled)
 
 
-def _print_result(idx: int, hit: dict, show_score: bool) -> None:
+def _print_result(idx: int, hit: SearchHit, show_score: bool) -> None:
     score = hit.get("score", 0.0)
     channel = hit.get("channel_name", hit.get("channel_id", "?"))
     date = hit.get("date", "")

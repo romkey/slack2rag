@@ -114,15 +114,23 @@ with the same model slack2rag uses, then search:
 import json, urllib.request
 from qdrant_client import QdrantClient
 
-payload = json.dumps({"model": "nomic-embed-text", "input": ["how do I set up SSO?"]}).encode()
-req = urllib.request.Request("http://localhost:11434/v1/embeddings",
-                             data=payload, headers={"Content-Type": "application/json"})
+payload = json.dumps(
+    {"model": "nomic-embed-text", "input": ["how do I set up SSO?"]}
+).encode()
+req = urllib.request.Request(
+    "http://localhost:11434/v1/embeddings",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+)
 with urllib.request.urlopen(req) as resp:
     vector = json.loads(resp.read())["data"][0]["embedding"]
 
 client = QdrantClient("http://localhost:6333")
 response = client.query_points(
-    collection_name="slack_messages", query=vector, limit=5, with_payload=True,
+    collection_name="slack_messages",
+    query=vector,
+    limit=5,
+    with_payload=True,
 )
 for hit in response.points:
     p = hit.payload

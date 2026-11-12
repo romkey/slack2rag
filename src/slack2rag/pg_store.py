@@ -7,7 +7,7 @@ Each row stores the full Slack API object as JSONB so no metadata is lost.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Protocol
 
 import psycopg
 from alembic import command as alembic_command
@@ -16,6 +16,17 @@ from alembic.script import ScriptDirectory
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
+
+# A raw Slack Web API JSON object (channel, message, user).  It is stored
+# verbatim as JSONB and its shape varies by object type and workspace, so the
+# values are Any; this module reads only "id", "ts" and "user".
+SlackObject = dict[str, Any]
+
+
+class UserLookup(Protocol):
+    """What persist_channel_messages_and_users needs from the Slack client."""
+
+    def get_user_record(self, user_id: str) -> SlackObject | None: ...
 
 
 class SchemaError(RuntimeError):
@@ -63,8 +74,8 @@ class PgStore:
         self._conninfo = conninfo
 
     @staticmethod
-    def from_url(url: str) -> PgStore | None:
-        if not (url or "").strip():
+    def from_url(url: str | None) -> PgStore | None:
+        if url is None or not url.strip():
             return None
         return PgStore(url.strip())
 
@@ -78,7 +89,7 @@ class PgStore:
             return None if row is None else str(row[0])
 
     def check_schema(self) -> None:
-        """Raise SchemaError unless `slack2rag migrate` has brought the schema up to date."""
+        """Raise SchemaError unless the schema is at head (`slack2rag migrate`)."""
         revision = self.schema_revision()
         head = head_revision()
         if revision != head:
@@ -87,7 +98,7 @@ class PgStore:
                 f"{head}; run `slack2rag migrate` first"
             )
 
-    def upsert_channel(self, channel: dict[str, Any]) -> None:
+    def upsert_channel(self, channel: SlackObject) -> None:
         cid = channel.get("id")
         if not cid:
             logger.warning("upsert_channel: missing id, skipping")
@@ -105,7 +116,7 @@ class PgStore:
             )
             conn.commit()
 
-    def upsert_user(self, user: dict[str, Any]) -> None:
+    def upsert_user(self, user: SlackObject) -> None:
         uid = user.get("id")
         if not uid:
             logger.warning("upsert_user: missing id, skipping")
@@ -123,7 +134,7 @@ class PgStore:
             )
             conn.commit()
 
-    def upsert_message(self, channel_id: str, message: dict[str, Any]) -> None:
+    def upsert_message(self, channel_id: str, message: SlackObject) -> None:
         ts = message.get("ts")
         if not ts:
             logger.warning("upsert_message: missing ts, skipping")
@@ -141,7 +152,7 @@ class PgStore:
             )
             conn.commit()
 
-    def bulk_upsert_users(self, users: list[dict[str, Any]]) -> None:
+    def bulk_upsert_users(self, users: list[SlackObject]) -> None:
         if not users:
             return
         rows = [(u["id"], Jsonb(u)) for u in users if u.get("id")]
@@ -163,10 +174,10 @@ class PgStore:
 
     def persist_channel_messages_and_users(
         self,
-        slack: Any,
-        channel: dict[str, Any],
-        root_msg: dict[str, Any],
-        replies: list[dict[str, Any]],
+        slack: UserLookup,
+        channel: SlackObject,
+        root_msg: SlackObject,
+        replies: list[SlackObject],
     ) -> None:
         """Store channel row, each message JSON, and any referenced users."""
         cid = channel.get("id")

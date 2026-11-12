@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import datetime
+import itertools
 import uuid
 from collections import Counter
+from typing import TypedDict, Unpack
 
 import pytest
 
@@ -21,6 +23,7 @@ from slack2rag.processor import (
     build_user_summary,
     build_workspace_summary,
 )
+from slack2rag.processor import SlackObject as JsonDict
 
 # 2024-01-25T14:30:00Z
 TS = "1706193000.000100"
@@ -40,7 +43,23 @@ def _now() -> float:
     return datetime.datetime.now(datetime.UTC).timestamp()
 
 
-def _build(root: dict, replies: list[dict] | None = None, **kwargs) -> list[Document]:
+class _BuildOptions(TypedDict, total=False):
+    """The keyword-only options of build_documents that tests vary."""
+
+    permalink: str
+    channel_topic: str
+    reaction_count: int
+    reactions: list[str] | None
+    attachments: list[str] | None
+    min_message_length: int
+    reaction_boost_threshold: int
+
+
+def _build(
+    root: JsonDict,
+    replies: list[JsonDict] | None = None,
+    **kwargs: Unpack[_BuildOptions],
+) -> list[Document]:
     return build_documents(root, replies or [], CHANNEL, _identity, _name, **kwargs)
 
 
@@ -70,6 +89,7 @@ def test_ts_conversions_out_of_range_timestamp() -> None:
 
 
 def test_ts_to_iso_date_handles_none() -> None:
+    # Deliberately the wrong type: the function guards against TypeError.
     assert processor._ts_to_iso_date(None) == ""  # type: ignore[arg-type]
 
 
@@ -101,7 +121,7 @@ def test_chunk_splits_on_line_boundaries_with_overlap() -> None:
         for ln in c.split("\n"):
             assert ln in lines
     # consecutive chunks share trailing/leading lines within the overlap budget
-    for prev, nxt in zip(chunks, chunks[1:]):
+    for prev, nxt in itertools.pairwise(chunks):
         prev_last = prev.split("\n")[-1]
         assert nxt.split("\n")[0] in prev.split("\n")
         assert prev_last in nxt.split("\n")
@@ -400,7 +420,8 @@ def test_channel_stats_round_trip_and_truncation() -> None:
     )
     data = cs.to_dict()
     assert len(data["token_counts"]) == 500
-    assert "t599" in data["token_counts"] and "t0" not in data["token_counts"]
+    assert "t599" in data["token_counts"]
+    assert "t0" not in data["token_counts"]
     assert data["user_counts"] == {"U1": 2}
     assert len(data["timestamps"]) == 10_000
     assert data["timestamps"][0] == 50.0
@@ -514,7 +535,7 @@ def test_channel_summary_purpose_same_as_topic_and_empty_stats() -> None:
 
 
 def test_workspace_summary_sorts_by_count() -> None:
-    channels = [
+    channels: list[JsonDict] = [
         {"id": "C1", "name": "quiet", "num_members": 3},
         {
             "id": "C2",
@@ -608,7 +629,7 @@ def test_user_summary_admin_and_no_extras() -> None:
         ({"user_id": "U4"}, "U4"),
     ],
 )
-def test_user_summary_display_fallbacks(profile: dict, expected: str) -> None:
+def test_user_summary_display_fallbacks(profile: JsonDict, expected: str) -> None:
     doc = build_user_summary(profile)
     assert doc.text.split("\n")[0] == f"Team member: {expected}"
     assert doc.user_name == expected
@@ -618,7 +639,7 @@ def test_user_summary_display_fallbacks(profile: dict, expected: str) -> None:
 
 
 def test_team_summary_with_bots_and_deleted() -> None:
-    profiles = [
+    profiles: list[JsonDict] = [
         {"user_id": "U1", "real_name": "zed", "title": "CTO", "pronouns": "he/him"},
         {"user_id": "U2", "display_name": "amy"},
         {"user_id": "U3", "username": "ghost", "deleted": True},

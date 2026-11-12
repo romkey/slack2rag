@@ -36,6 +36,8 @@ before this one have no changelog entries.
   `latest`), built for amd64 and arm64, instead of on every push to `main`.
 - Invalid numbers or booleans in the environment now stop the app with a
   message naming the variable, instead of a traceback or being ignored.
+- `LLM_BASE_URL` and `EVAL_BASE_URL` must be http:// or https:// URLs;
+  anything else is refused before a request is made.
 
 ### Added
 

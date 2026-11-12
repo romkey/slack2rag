@@ -22,7 +22,8 @@ def pg_url() -> str:
 def _drop_everything(url: str) -> None:
     with psycopg.connect(url) as conn:
         conn.execute(
-            "DROP TABLE IF EXISTS slack_messages, slack_users, slack_channels, alembic_version"
+            "DROP TABLE IF EXISTS"
+            " slack_messages, slack_users, slack_channels, alembic_version"
         )
         conn.commit()
 
@@ -57,7 +58,9 @@ def test_migrate_is_idempotent(pg: PgStore, pg_url: str) -> None:
     migrate(pg_url)
     pg.check_schema()
     with psycopg.connect(pg_url) as conn:
-        assert conn.execute("SELECT count(*) FROM slack_channels").fetchone()[0] == 1
+        row = conn.execute("SELECT count(*) FROM slack_channels").fetchone()
+        assert row is not None
+        assert row[0] == 1
 
 
 def test_downgrade_to_base_drops_tables(pg: PgStore, pg_url: str) -> None:
@@ -68,13 +71,13 @@ def test_downgrade_to_base_drops_tables(pg: PgStore, pg_url: str) -> None:
     command.downgrade(_alembic_config(pg_url), "base")
     assert pg.schema_revision() is None
     with psycopg.connect(pg_url) as conn:
-        assert (
-            conn.execute("SELECT to_regclass('slack_channels')").fetchone()[0] is None
-        )
+        row = conn.execute("SELECT to_regclass('slack_channels')").fetchone()
+        assert row is not None
+        assert row[0] is None
 
 
 def test_migrate_adopts_tables_created_before_migrations(empty_db: str) -> None:
-    """Databases from before Alembic already have the tables; migrate must not fail on them."""
+    """Pre-Alembic databases already have the tables; migrate must accept them."""
     with psycopg.connect(empty_db) as conn:
         conn.execute(
             "CREATE TABLE slack_channels (id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
@@ -150,7 +153,8 @@ def test_bulk_upsert_users(pg: PgStore) -> None:
     pg.bulk_upsert_users(users)
 
     with psycopg.connect(pg._conninfo) as conn:
-        n = conn.execute(
+        row = conn.execute(
             "SELECT count(*) FROM slack_users WHERE id IN ('U_A','U_B')"
-        ).fetchone()[0]
-        assert n == 2
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 2

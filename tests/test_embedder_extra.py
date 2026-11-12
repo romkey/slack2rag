@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import email.message
 import io
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
+from typing import TypedDict
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +28,11 @@ from slack2rag.embedder import (
 )
 
 
+class _Payload(TypedDict):
+    model: str
+    input: list[str]
+
+
 class _JsonResponse:
     def __init__(self, body: object) -> None:
         self._body = body
@@ -39,7 +47,7 @@ class _JsonResponse:
         return json.dumps(self._body).encode()
 
 
-def _ok(n: int, vec: list[float] | None = None) -> dict:
+def _ok(n: int, vec: list[float] | None = None) -> dict[str, object]:
     return {"data": [{"index": i, "embedding": vec or [1.0, 2.0]} for i in range(n)]}
 
 
@@ -47,23 +55,38 @@ def _http_error(
     code: int, body: bytes = b"", reason: str = "Bad"
 ) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        "http://llm/v1/embeddings", code, reason, {}, io.BytesIO(body)
+        "http://llm/v1/embeddings",
+        code,
+        reason,
+        email.message.Message(),
+        io.BytesIO(body),
     )
 
 
-def _make_embedder(monkeypatch, handler, **kwargs) -> Embedder:
+def _make_embedder(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[_Payload], _JsonResponse],
+    context_length: int = 0,
+    request_batch_size: int = 50,
+) -> Embedder:
     """Create an Embedder whose probe succeeds, then route later calls to *handler*."""
     state = {"probed": False}
 
-    def fake_urlopen(req, timeout):
-        payload = json.loads(req.data.decode())
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _JsonResponse:
+        assert isinstance(req.data, bytes)
+        payload: _Payload = json.loads(req.data)
         if not state["probed"]:
             state["probed"] = True
             return _JsonResponse(_ok(len(payload["input"])))
         return handler(payload)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    return Embedder(base_url="http://llm/v1/", model="m", **kwargs)
+    return Embedder(
+        base_url="http://llm/v1/",
+        model="m",
+        context_length=context_length,
+        request_batch_size=request_batch_size,
+    )
 
 
 # ── tokenizer / sparse encoder ───────────────────────────────────────────────
@@ -90,12 +113,14 @@ def test_sparse_encoder_empty_text() -> None:
 def test_sparse_encoder_log_tf_weights_sorted() -> None:
     out = SparseEncoder().encode(["deploy deploy deploy kubernetes"])[0]
     assert out["indices"] == sorted(out["indices"])
-    weights = dict(zip(out["indices"], out["values"]))
+    weights = dict(zip(out["indices"], out["values"], strict=True))
     assert weights[_token_hash("kubernetes")] == pytest.approx(1.0)
     assert weights[_token_hash("deploy")] == pytest.approx(1.0 + 1.0986122886681098)
 
 
-def test_sparse_encoder_hash_collision_accumulates(monkeypatch) -> None:
+def test_sparse_encoder_hash_collision_accumulates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(emb_mod, "_token_hash", lambda t: 7)
     out = SparseEncoder().encode(["alpha beta"])[0]
     assert out == {"indices": [7], "values": [2.0]}
@@ -112,7 +137,7 @@ def test_truncate_at_word() -> None:
 
 
 @pytest.mark.parametrize(
-    "code,body,expected",
+    ("code", "body", "expected"),
     [
         (400, b"input exceeds maximum context length", True),
         (413, b"Request too long", True),
@@ -121,18 +146,20 @@ def test_truncate_at_word() -> None:
         (500, b"context length", False),
     ],
 )
-def test_is_context_length_error(code, body, expected) -> None:
+def test_is_context_length_error(code: int, body: bytes, expected: bool) -> None:
     assert _is_context_length_error(_http_error(code, body)) is expected
 
 
-def test_is_context_length_error_unreadable_body() -> None:
+def test_is_context_length_error_unreadable_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     exc = _http_error(400)
-    exc.read = MagicMock(side_effect=OSError("closed"))
+    monkeypatch.setattr(exc, "read", MagicMock(side_effect=OSError("closed")))
     assert _is_context_length_error(exc) is False
 
 
 @pytest.mark.parametrize(
-    "value,ok",
+    ("value", "ok"),
     [
         ([0.1, 2, -3.5], True),
         ([], False),
@@ -143,15 +170,17 @@ def test_is_context_length_error_unreadable_body() -> None:
         ([1.0, "2"], False),
     ],
 )
-def test_is_valid_embedding(value, ok) -> None:
+def test_is_valid_embedding(value: object, ok: bool) -> None:
     assert _is_valid_embedding(value) is ok
 
 
 # ── constructor ──────────────────────────────────────────────────────────────
 
 
-def test_constructor_wraps_unexpected_exception(monkeypatch) -> None:
-    def fake_urlopen(req, timeout):
+def test_constructor_wraps_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _JsonResponse:
         raise ValueError("weird")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -159,8 +188,16 @@ def test_constructor_wraps_unexpected_exception(monkeypatch) -> None:
         Embedder(base_url="http://x/v1", model="m")
 
 
-def test_constructor_propagates_embedding_error(monkeypatch) -> None:
-    def fake_urlopen(req, timeout):
+@pytest.mark.parametrize("base_url", ["file:///etc/passwd", "ftp://x/v1", "llm/v1"])
+def test_constructor_rejects_non_http_scheme(base_url: str) -> None:
+    with pytest.raises(EmbeddingError, match="must start with http:// or https://"):
+        Embedder(base_url=base_url, model="m")
+
+
+def test_constructor_propagates_embedding_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _JsonResponse:
         raise urllib.error.URLError("refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -170,10 +207,12 @@ def test_constructor_propagates_embedding_error(monkeypatch) -> None:
         Embedder(base_url="http://x/v1", model="m")
 
 
-def test_constructor_dimension_and_context_truncation(monkeypatch) -> None:
-    seen: list = []
+def test_constructor_dimension_and_context_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
 
-    def handler(payload):
+    def handler(payload: _Payload) -> _JsonResponse:
         seen.append(payload["input"])
         return _JsonResponse(_ok(len(payload["input"])))
 
@@ -185,10 +224,10 @@ def test_constructor_dimension_and_context_truncation(monkeypatch) -> None:
     assert seen == [["hello world"]]
 
 
-def test_request_batch_size_chunks(monkeypatch) -> None:
+def test_request_batch_size_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     sizes: list[int] = []
 
-    def handler(payload):
+    def handler(payload: _Payload) -> _JsonResponse:
         sizes.append(len(payload["input"]))
         return _JsonResponse(_ok(len(payload["input"])))
 
@@ -197,10 +236,10 @@ def test_request_batch_size_chunks(monkeypatch) -> None:
     assert sizes == [2, 2, 1]
 
 
-def test_request_batch_size_minimum_one(monkeypatch) -> None:
+def test_request_batch_size_minimum_one(monkeypatch: pytest.MonkeyPatch) -> None:
     sizes: list[int] = []
 
-    def handler(payload):
+    def handler(payload: _Payload) -> _JsonResponse:
         sizes.append(len(payload["input"]))
         return _JsonResponse(_ok(len(payload["input"])))
 
@@ -212,8 +251,8 @@ def test_request_batch_size_minimum_one(monkeypatch) -> None:
 # ── HTTP error handling ──────────────────────────────────────────────────────
 
 
-def test_http_error_includes_body(monkeypatch) -> None:
-    def handler(payload):
+def test_http_error_includes_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(payload: _Payload) -> _JsonResponse:
         raise _http_error(500, b"internal kaboom", reason="Server Error")
 
     e = _make_embedder(monkeypatch, handler)
@@ -226,10 +265,10 @@ def test_http_error_includes_body(monkeypatch) -> None:
     assert not isinstance(exc.value, _ContextLengthError)
 
 
-def test_http_error_unreadable_body(monkeypatch) -> None:
-    def handler(payload):
+def test_http_error_unreadable_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(payload: _Payload) -> _JsonResponse:
         exc = _http_error(503)
-        exc.read = MagicMock(side_effect=OSError("closed"))
+        monkeypatch.setattr(exc, "read", MagicMock(side_effect=OSError("closed")))
         raise exc
 
     e = _make_embedder(monkeypatch, handler)
@@ -239,8 +278,8 @@ def test_http_error_unreadable_body(monkeypatch) -> None:
     assert "Response:" not in str(exc.value)
 
 
-def test_url_error_after_construction(monkeypatch) -> None:
-    def handler(payload):
+def test_url_error_after_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(payload: _Payload) -> _JsonResponse:
         raise urllib.error.URLError("timed out")
 
     e = _make_embedder(monkeypatch, handler)
@@ -251,11 +290,13 @@ def test_url_error_after_construction(monkeypatch) -> None:
 # ── context-length fallback ──────────────────────────────────────────────────
 
 
-def test_context_error_falls_back_to_single_and_halves(monkeypatch) -> None:
+def test_context_error_falls_back_to_single_and_halves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     long_text = ("word " * 100).strip()  # 499 chars
     inputs: list[list[str]] = []
 
-    def handler(payload):
+    def handler(payload: _Payload) -> _JsonResponse:
         inputs.append(payload["input"])
         batch = payload["input"]
         if len(batch) > 1 or len(batch[0]) > 200:
@@ -274,8 +315,8 @@ def test_context_error_falls_back_to_single_and_halves(monkeypatch) -> None:
     assert inputs[-1] == ["short"]
 
 
-def test_context_error_gives_up_below_min_len(monkeypatch) -> None:
-    def handler(payload):
+def test_context_error_gives_up_below_min_len(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(payload: _Payload) -> _JsonResponse:
         raise _http_error(413, b"payload exceeds limit")
 
     e = _make_embedder(monkeypatch, handler)
@@ -287,7 +328,7 @@ def test_context_error_gives_up_below_min_len(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "body,match",
+    ("body", "match"),
     [
         ([1, 2], "Unexpected response shape"),
         ({"embeddings": []}, "Unexpected response shape"),
@@ -298,19 +339,21 @@ def test_context_error_gives_up_below_min_len(monkeypatch) -> None:
         ),
     ],
 )
-def test_bad_response_shapes(monkeypatch, body, match) -> None:
+def test_bad_response_shapes(
+    monkeypatch: pytest.MonkeyPatch, body: object, match: str
+) -> None:
     e = _make_embedder(monkeypatch, lambda p: _JsonResponse(body))
     with pytest.raises(EmbeddingError, match=match):
         e.embed(["x"])
 
 
-def test_non_dict_item_is_malformed(monkeypatch) -> None:
+def test_non_dict_item_is_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     e = _make_embedder(monkeypatch, lambda p: _JsonResponse({"data": ["oops"]}))
     with pytest.raises(EmbeddingError, match="invalid embedding for a single input"):
         e.embed(["x"])
 
 
-def test_bad_index_falls_back_to_slot(monkeypatch) -> None:
+def test_bad_index_falls_back_to_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     body = {
         "data": [
             {"index": 99, "embedding": [1.0]},
@@ -321,16 +364,18 @@ def test_bad_index_falls_back_to_slot(monkeypatch) -> None:
     assert e.embed(["a", "b"]) == [[1.0], [2.0]]
 
 
-def test_missing_index_uses_slot(monkeypatch) -> None:
+def test_missing_index_uses_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     body = {"data": [{"embedding": [1.0]}, {"embedding": [2.0]}]}
     e = _make_embedder(monkeypatch, lambda p: _JsonResponse(body))
     assert e.embed(["a", "b"]) == [[1.0], [2.0]]
 
 
-def test_duplicate_index_leaves_hole_and_falls_back(monkeypatch) -> None:
+def test_duplicate_index_leaves_hole_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[int] = []
 
-    def handler(payload):
+    def handler(payload: _Payload) -> _JsonResponse:
         n = len(payload["input"])
         calls.append(n)
         if n == 2:
@@ -357,8 +402,8 @@ def test_duplicate_index_leaves_hole_and_falls_back(monkeypatch) -> None:
     reason="src bug: _is_context_length_error consumes the HTTPError body, so the "
     "subsequent EmbeddingError for a non-context 400/413/422 has no 'Response:'",
 )
-def test_non_context_400_keeps_response_body(monkeypatch) -> None:
-    def handler(payload):
+def test_non_context_400_keeps_response_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(payload: _Payload) -> _JsonResponse:
         raise _http_error(400, b"model 'm' is not an embedding model")
 
     e = _make_embedder(monkeypatch, handler)

@@ -19,12 +19,38 @@ from __future__ import annotations
 import datetime
 import uuid
 from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any, TypedDict
+
+# A raw Slack API object (message, channel, user profile) as decoded from
+# JSON.  Its values are heterogeneous and only loosely specified by Slack,
+# so Any is the honest value type; fields are read with .get() and defaults.
+SlackObject = dict[str, Any]
+
+# Maps a Slack user ID or raw message text to a display form.
+StrTransform = Callable[[str], str]
 
 MAX_CHARS = 1_500  # target document size before chunking
 OVERLAP = 200  # character overlap between consecutive chunks
 THREAD_SUMMARY_MIN_REPLIES = 3
 REPLY_PREVIEW_CHARS = 120
+
+
+class Cadence(TypedDict):
+    """Recent-activity figures for a channel (see ChannelStats.cadence)."""
+
+    messages_last_7d: int
+    messages_last_30d: int
+    last_message_date: str
+
+
+class ChannelStatsData(TypedDict):
+    """JSON-serializable form of ChannelStats (see ChannelStats.to_dict)."""
+
+    token_counts: dict[str, int]
+    user_counts: dict[str, int]
+    timestamps: list[float]
 
 
 @dataclass
@@ -50,7 +76,7 @@ class Document:
     doc_type: str = "message"
     source_system: str = "slack"
 
-    def payload(self) -> dict:
+    def payload(self) -> dict[str, object]:
         """Return metadata dict suitable for Qdrant point payload."""
         return {
             "channel_id": self.channel_id,
@@ -150,7 +176,9 @@ def _chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> lis
     return chunks
 
 
-def _format_message(msg: dict, user_name: str, resolve_text) -> str:
+def _format_message(
+    msg: SlackObject, user_name: str, resolve_text: StrTransform
+) -> str:
     text = resolve_text(msg.get("text", "")).strip()
     if not text:
         return ""
@@ -161,11 +189,11 @@ def _format_message(msg: dict, user_name: str, resolve_text) -> str:
 
 
 def build_documents(
-    root_msg: dict,
-    replies: list[dict],
-    channel: dict,
-    resolve_text,
-    get_user_name,
+    root_msg: SlackObject,
+    replies: list[SlackObject],
+    channel: SlackObject,
+    resolve_text: StrTransform,
+    get_user_name: StrTransform,
     *,
     permalink: str = "",
     channel_topic: str = "",
@@ -189,8 +217,8 @@ def build_documents(
     Threads with 3+ replies also produce a condensed ``thread_summary``
     document alongside the regular message documents.
     """
-    channel_id = channel["id"]
-    channel_name = channel.get("name", channel_id)
+    channel_id: str = channel["id"]
+    channel_name: str = channel.get("name", channel_id)
     ts = root_msg["ts"]
     thread_ts = root_msg.get("thread_ts") or ts
     reply_count = len(replies)
@@ -365,20 +393,22 @@ def _ts_to_iso_date(ts_str: str) -> str:
 class ChannelStats:
     """Accumulated per-channel statistics built during sync."""
 
-    token_counts: Counter = field(default_factory=Counter)
-    user_counts: Counter = field(default_factory=Counter)
+    token_counts: Counter[str] = field(default_factory=Counter)
+    user_counts: Counter[str] = field(default_factory=Counter)
     timestamps: list[float] = field(default_factory=list)
 
     def top_terms(self, n: int = 20) -> list[str]:
         return [term for term, _ in self.token_counts.most_common(n)]
 
-    def top_posters(self, n: int = 10, get_name=None) -> list[str]:
-        names = []
+    def top_posters(
+        self, n: int = 10, get_name: StrTransform | None = None
+    ) -> list[str]:
+        names: list[str] = []
         for uid, _ in self.user_counts.most_common(n):
             names.append(get_name(uid) if get_name else uid)
         return names
 
-    def cadence(self) -> dict:
+    def cadence(self) -> Cadence:
         """Return messages_last_7d, messages_last_30d, last_message_date."""
         now = datetime.datetime.now(datetime.UTC).timestamp()
         d7 = now - 7 * 86400
@@ -395,7 +425,7 @@ class ChannelStats:
             "last_message_date": last_date,
         }
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> ChannelStatsData:
         """Serialize for persistent storage."""
         return {
             "token_counts": dict(self.token_counts.most_common(500)),
@@ -404,7 +434,9 @@ class ChannelStats:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> ChannelStats:
+    # Any: *data* is decoded JSON from the stats file, so its values are unchecked.
+    def from_dict(cls, data: Mapping[str, Any]) -> ChannelStats:
+        """Rebuild from to_dict() output (or older/partial JSON from disk)."""
         cs = cls()
         cs.token_counts = Counter(data.get("token_counts", {}))
         cs.user_counts = Counter(data.get("user_counts", {}))
@@ -422,17 +454,18 @@ class ChannelStats:
 
 
 def build_channel_summary(
-    channel: dict,
+    channel: SlackObject,
     message_count: int,
     stats: ChannelStats | None = None,
-    get_user_name=None,
+    get_user_name: StrTransform | None = None,
 ) -> Document:
     """Build a summary document describing a single channel.
 
     Designed to surface when users ask questions like "what is #engineering
     for?", "how active is #random?", or "which channel handles incidents?"
     """
-    name = channel.get("name", channel.get("id", "unknown"))
+    fallback_name: str = channel.get("id", "unknown")
+    name: str = channel.get("name", fallback_name)
     channel_id = channel["id"]
     topic = channel.get("topic", {}).get("value", "")
     purpose = channel.get("purpose", {}).get("value", "")
@@ -487,7 +520,7 @@ def build_channel_summary(
 
 
 def build_workspace_summary(
-    channels: list[dict],
+    channels: list[SlackObject],
     channel_counts: dict[str, int],
 ) -> Document:
     """Build a summary document listing all indexed channels.
@@ -498,7 +531,8 @@ def build_workspace_summary(
     total_messages = sum(channel_counts.values())
 
     lines = [
-        f"This Slack workspace has {len(channels)} indexed public channel{'s' if len(channels) != 1 else ''} "
+        f"This Slack workspace has {len(channels)} indexed public "
+        f"channel{'s' if len(channels) != 1 else ''} "
         f"with {total_messages:,} total messages.",
         "",
         "Channels:",
@@ -537,7 +571,7 @@ def build_workspace_summary(
 
 
 def build_user_summary(
-    profile: dict,
+    profile: SlackObject,
     active_channels: list[str] | None = None,
 ) -> Document:
     """Build a summary document for a single Slack user.
@@ -602,7 +636,7 @@ def build_user_summary(
     )
 
 
-def build_team_summary(profiles: list[dict]) -> Document:
+def build_team_summary(profiles: list[SlackObject]) -> Document:
     """Build a summary document listing all team members.
 
     Surfaces when users ask "who is on the team?", "how many people
@@ -612,7 +646,8 @@ def build_team_summary(profiles: list[dict]) -> Document:
     bots = [p for p in profiles if p.get("is_bot") and not p.get("deleted")]
 
     lines = [
-        f"This Slack workspace has {len(active)} active team member{'s' if len(active) != 1 else ''}"
+        f"This Slack workspace has {len(active)} active team "
+        f"member{'s' if len(active) != 1 else ''}"
     ]
     if bots:
         lines[0] += f" and {len(bots)} bot{'s' if len(bots) != 1 else ''}."

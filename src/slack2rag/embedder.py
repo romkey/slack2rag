@@ -15,14 +15,17 @@ Sparse encoding:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import math
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
+from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,14 @@ class EmbeddingError(RuntimeError):
 
 
 # ── Sparse encoder ────────────────────────────────────────────────────────────
+
+
+class SparseVector(TypedDict):
+    """A sparse vector: parallel lists of bucket indices and their weights."""
+
+    indices: list[int]
+    values: list[float]
+
 
 SPARSE_VOCAB_SIZE = 2**16  # 65 536 hash buckets — low collision for typical text
 
@@ -108,7 +119,10 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _token_hash(token: str) -> int:
-    return int(hashlib.md5(token.encode()).hexdigest(), 16) % SPARSE_VOCAB_SIZE
+    return (
+        int(hashlib.md5(token.encode(), usedforsecurity=False).hexdigest(), 16)
+        % SPARSE_VOCAB_SIZE
+    )
 
 
 def tokenize_text(text: str) -> list[str]:
@@ -124,11 +138,11 @@ def tokenize_text(text: str) -> list[str]:
 class SparseEncoder:
     """Deterministic BM25-like sparse vector encoder (no training required)."""
 
-    def encode(self, texts: list[str]) -> list[dict]:
+    def encode(self, texts: list[str]) -> list[SparseVector]:
         """Return a list of dicts with 'indices' and 'values' keys."""
         return [self._encode_one(t) for t in texts]
 
-    def _encode_one(self, text: str) -> dict:
+    def _encode_one(self, text: str) -> SparseVector:
         tokens = tokenize_text(text)
         if not tokens:
             return {"indices": [0], "values": [0.0]}
@@ -200,10 +214,15 @@ class Embedder:
         request_batch_size: int = 50,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # urlopen also accepts file: and other schemes; only HTTP(S) makes sense
+        # for an embeddings API, so refuse anything else before sending a request.
+        if urllib.parse.urlsplit(self._base_url).scheme not in ("http", "https"):
+            raise EmbeddingError(
+                f"LLM base URL must start with http:// or https://: {self._base_url!r}"
+            )
         self._model = model
         self._api_key = api_key
         self._input_prefix = input_prefix
-        self._dimension: int | None = None
         self._max_chars = context_length * 3 if context_length > 0 else 0
         self._request_batch_size = max(1, request_batch_size)
         # Servers known to mishandle array inputs flip this to True after
@@ -227,14 +246,14 @@ class Embedder:
             raise
         except Exception as exc:
             raise EmbeddingError(
-                f"Failed to connect to LLM at {self._base_url} with model {model!r}: {exc}"
+                f"Failed to connect to LLM at {self._base_url} "
+                f"with model {model!r}: {exc}"
             ) from exc
-        self._dimension = len(probe[0])
+        self._dimension: int = len(probe[0])
         logger.info("Embedding dimension: %d", self._dimension)
 
     @property
     def dimension(self) -> int:
-        assert self._dimension is not None
         return self._dimension
 
     # ── public entry point ─────────────────────────────────────────────────
@@ -278,7 +297,7 @@ class Embedder:
         while True:
             try:
                 return self._call_api([current])[0]
-            except _ContextLengthError:
+            except _ContextLengthError as exc:
                 attempt += 1
                 new_len = len(current) // 2
                 if new_len < _MIN_TEXT_LEN:
@@ -292,7 +311,7 @@ class Embedder:
                     raise EmbeddingError(
                         f"Cannot embed text even at {len(current)} chars "
                         f"(model {self._model!r})"
-                    )
+                    ) from exc
                 current = _truncate_at_word(text, new_len)
                 logger.warning(
                     "Context-length error (attempt %d) — truncating to %d "
@@ -316,7 +335,7 @@ class Embedder:
             batch = texts[i : i + chunk_size]
             try:
                 vectors = self._post_embeddings(batch)
-            except _MalformedBatchError:
+            except _MalformedBatchError as exc:
                 # Server returned the right shape but null/invalid embeddings.
                 # Drop to single-input mode and retry this batch one at a time.
                 if len(batch) == 1:
@@ -325,7 +344,7 @@ class Embedder:
                         f"for a single input with model {self._model!r}.  This "
                         "usually means the model isn't an embedding model, the "
                         "input was empty, or the server is misconfigured."
-                    )
+                    ) from exc
                 logger.warning(
                     "LLM returned null/invalid embeddings for a batch of %d; "
                     "falling back to one-input-per-request for the rest of "
@@ -357,10 +376,12 @@ class Embedder:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        req = urllib.request.Request(endpoint, data=payload, headers=headers)
+        # S310 below: the URL is the operator's LLM_BASE_URL, and __init__ has
+        # already refused any scheme other than http/https.
+        req = urllib.request.Request(endpoint, data=payload, headers=headers)  # noqa: S310
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
                 data = json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             if _is_context_length_error(exc):
@@ -368,10 +389,10 @@ class Embedder:
                     f"Input exceeds context length for model {self._model!r}"
                 ) from exc
             body = ""
-            try:
+            # The body is only extra detail for the message; failing to read it
+            # must not hide the HTTP error itself.
+            with contextlib.suppress(Exception):
                 body = exc.read().decode(errors="replace").strip()
-            except Exception:
-                pass
             raise EmbeddingError(
                 f"LLM returned HTTP {exc.code} ({exc.reason}) "
                 f"for POST {endpoint} with model {self._model!r}"
@@ -423,9 +444,10 @@ class Embedder:
                 raise _MalformedBatchError()
             ordered[idx] = embedding
 
-        if any(v is None for v in ordered):
+        vectors = [v for v in ordered if v is not None]
+        if len(vectors) != expected:
             raise _MalformedBatchError()
-        return ordered  # type: ignore[return-value]
+        return vectors
 
 
 def _is_valid_embedding(value: object) -> bool:

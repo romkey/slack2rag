@@ -15,13 +15,14 @@ Flow per sync cycle
 """
 
 import argparse
+import contextlib
 import json
 import logging
-import os
 import signal
 import threading
 import time
 from collections import Counter
+from pathlib import Path
 from types import FrameType
 
 from .config import Config
@@ -31,6 +32,8 @@ from .pg_store import PgStore, SchemaError
 from .processor import (
     ChannelStats,
     Document,
+    SlackObject,
+    StrTransform,
     build_channel_summary,
     build_documents,
     build_team_summary,
@@ -48,9 +51,9 @@ stop_event = threading.Event()
 
 
 def _build_docs_for_message(
-    msg: dict,
-    replies: list[dict],
-    channel: dict,
+    msg: SlackObject,
+    replies: list[SlackObject],
+    channel: SlackObject,
     slack: SlackClient,
     cfg: Config,
 ) -> list[Document]:
@@ -87,7 +90,7 @@ def _build_docs_for_message(
 
 
 def sync_channel(
-    channel: dict,
+    channel: SlackObject,
     slack: SlackClient,
     store: VectorStore,
     embedder: Embedder,
@@ -114,7 +117,7 @@ def sync_channel(
         if latest_ts is None or float(ts) > float(latest_ts):
             latest_ts = ts
 
-        replies: list[dict] = []
+        replies: list[SlackObject] = []
         if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == ts:
             replies = slack.get_thread_replies(channel_id, ts)
 
@@ -124,10 +127,8 @@ def sync_channel(
         uid = msg.get("user", "unknown")
         if uid != "unknown":
             stats.user_counts[uid] += 1
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             stats.timestamps.append(float(ts))
-        except ValueError, TypeError:
-            pass
         for reply in replies:
             reply_text = reply.get("text", "")
             stats.token_counts.update(Counter(tokenize_text(reply_text)))
@@ -163,7 +164,7 @@ def sync_channel(
 
 
 def refresh_threads(
-    channel: dict,
+    channel: SlackObject,
     slack: SlackClient,
     store: VectorStore,
     embedder: Embedder,
@@ -230,34 +231,38 @@ def _flush(
     return len(docs)
 
 
-def _load_channel_stats(stats_file: str) -> dict[str, ChannelStats]:
+def _load_channel_stats(stats_file: str | Path) -> dict[str, ChannelStats]:
     """Load persistent channel stats from disk."""
-    if not os.path.exists(stats_file):
+    path = Path(stats_file)
+    if not path.exists():
         return {}
     try:
-        with open(stats_file) as f:
+        with path.open() as f:
             raw = json.load(f)
         return {k: ChannelStats.from_dict(v) for k, v in raw.items()}
     except json.JSONDecodeError, OSError, KeyError:
         return {}
 
 
-def _save_channel_stats(stats_file: str, all_stats: dict[str, ChannelStats]) -> None:
+def _save_channel_stats(
+    stats_file: str | Path, all_stats: dict[str, ChannelStats]
+) -> None:
     """Persist accumulated channel stats to disk."""
-    os.makedirs(os.path.dirname(stats_file) or ".", exist_ok=True)
+    path = Path(stats_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
     raw = {k: v.to_dict() for k, v in all_stats.items()}
     try:
-        with open(stats_file, "w") as f:
+        with path.open("w") as f:
             json.dump(raw, f)
     except OSError as exc:
         logger.warning("Could not save channel stats: %s", exc)
 
 
 def _index_summaries(
-    channels: list[dict],
+    channels: list[SlackObject],
     channel_stats: dict[str, ChannelStats],
-    user_profiles: dict[str, dict],
-    get_user_name,
+    user_profiles: dict[str, SlackObject],
+    get_user_name: StrTransform,
     store: VectorStore,
     embedder: Embedder,
     sparse_encoder: SparseEncoder | None,
@@ -284,8 +289,11 @@ def _index_summaries(
     summary_docs.append(build_workspace_summary(channels, channel_counts))
 
     # Build user→channel activity map from accumulated stats
-    user_channels: dict[str, Counter] = {}
-    channel_names = {ch["id"]: ch.get("name", ch["id"]) for ch in channels}
+    user_channels: dict[str, Counter[str]] = {}
+    channel_names: dict[str, str] = {}
+    for ch in channels:
+        ch_id: str = ch["id"]
+        channel_names[ch_id] = ch.get("name", ch_id)
     for cid, cstats in channel_stats.items():
         cname = channel_names.get(cid, cid)
         for uid, msg_count in cstats.user_counts.items():
@@ -305,7 +313,7 @@ def _index_summaries(
     logger.info("Indexed %d summary documents", len(summary_docs))
 
 
-def _get_channels(cfg: Config, slack: SlackClient) -> list[dict]:
+def _get_channels(cfg: Config, slack: SlackClient) -> list[SlackObject]:
     """Fetch channels, applying both the include list and the blacklist."""
     channels = slack.get_public_channels(cfg.channel_list or None)
     blacklist = cfg.channel_blacklist
@@ -340,7 +348,7 @@ def run_once(
         logger.warning("No accessible public channels found")
         return
 
-    stats_file = os.path.join(os.path.dirname(cfg.state_file), "channel_stats.json")
+    stats_file = Path(cfg.state_file).parent / "channel_stats.json"
     all_stats = _load_channel_stats(stats_file)
 
     total = 0
@@ -531,7 +539,8 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
     if cfg.eval_test:
         if not cfg.eval_prompt:
             logger.error(
-                "EVAL_TEST is set but EVAL_PROMPT is empty — nothing to evaluate against"
+                "EVAL_TEST is set but EVAL_PROMPT is empty"
+                " — nothing to evaluate against"
             )
             return 1
         if not cfg.eval_model:

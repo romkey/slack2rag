@@ -23,10 +23,9 @@ USAGE = __doc__ or ""
 
 
 def _settings() -> Config:
-    """Settings from the environment (and a .env file in the working directory, if any)."""
-    load_dotenv(
-        ".env"
-    )  # a bare load_dotenv() searches from this file's directory, not the cwd
+    """Settings from the environment, plus a .env file in the working directory."""
+    # A bare load_dotenv() searches from this file's directory, not the cwd.
+    load_dotenv(".env")
     return Config.from_env()
 
 

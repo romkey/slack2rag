@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 from psycopg.types.json import Jsonb
 
 from slack2rag import pg_store
@@ -13,7 +16,7 @@ from slack2rag.pg_store import PgStore, SchemaError
 
 
 @pytest.fixture
-def conn(monkeypatch):
+def conn(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch psycopg.connect; return the mock connection used inside `with`."""
     connection = MagicMock(name="conn")
     connection.__enter__.return_value = connection
@@ -23,17 +26,17 @@ def conn(monkeypatch):
     cursor.__exit__.return_value = False
     connection.cursor.return_value = cursor
     connect = MagicMock(return_value=connection)
-    monkeypatch.setattr(pg_store.psycopg, "connect", connect)
+    monkeypatch.setattr(psycopg, "connect", connect)
     connection.connect = connect
     connection.cur = cursor
     return connection
 
 
-def _executed(conn) -> list[tuple[str, tuple]]:
+def _executed(conn: MagicMock) -> list[tuple[str, tuple[object, ...]]]:
     return [(c.args[0], c.args[1]) for c in conn.execute.call_args_list]
 
 
-def _jsonb_obj(value) -> object:
+def _jsonb_obj(value: object) -> object:
     assert isinstance(value, Jsonb)
     return value.obj
 
@@ -42,11 +45,11 @@ def _jsonb_obj(value) -> object:
 
 
 @pytest.mark.parametrize("url", ["", "   ", None])
-def test_from_url_empty_returns_none(url) -> None:
+def test_from_url_empty_returns_none(url: str | None) -> None:
     assert PgStore.from_url(url) is None
 
 
-def test_from_url_strips(conn) -> None:
+def test_from_url_strips(conn: MagicMock) -> None:
     store = PgStore.from_url("  postgresql://u@h/db \n")
     assert isinstance(store, PgStore)
     store.upsert_channel({"id": "C1"})
@@ -57,7 +60,7 @@ def test_from_url_strips(conn) -> None:
 
 
 @pytest.mark.parametrize(
-    "url,expected",
+    ("url", "expected"),
     [
         ("postgresql://u:p@h:5432/db", "postgresql+psycopg://u:p@h:5432/db"),
         ("postgres://u@h/db", "postgresql+psycopg://u@h/db"),
@@ -65,7 +68,7 @@ def test_from_url_strips(conn) -> None:
         ("sqlite:///x.db", "sqlite:///x.db"),
     ],
 )
-def test_sqlalchemy_url(url, expected) -> None:
+def test_sqlalchemy_url(url: str, expected: str) -> None:
     assert pg_store.sqlalchemy_url(url) == expected
 
 
@@ -80,9 +83,11 @@ def test_head_revision_is_initial_migration() -> None:
     assert pg_store.head_revision() == "0001"
 
 
-def test_migrate_upgrades_to_head(monkeypatch, caplog) -> None:
+def test_migrate_upgrades_to_head(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     upgrade = MagicMock()
-    monkeypatch.setattr(pg_store.alembic_command, "upgrade", upgrade)
+    monkeypatch.setattr(alembic_command, "upgrade", upgrade)
     with caplog.at_level(logging.INFO, logger="slack2rag.pg_store"):
         pg_store.migrate("postgresql://u@h/db")
     [(cfg, target)] = [c.args for c in upgrade.call_args_list]
@@ -91,10 +96,10 @@ def test_migrate_upgrades_to_head(monkeypatch, caplog) -> None:
     assert "schema is at revision 0001" in caplog.text
 
 
-def test_migrations_render_offline_sql(capsys) -> None:
-    """Runs env.py and 0001 in Alembic's offline mode: SQL is printed, nothing connects."""
+def test_migrations_render_offline_sql(capsys: pytest.CaptureFixture[str]) -> None:
+    """Run env.py and 0001 in Alembic's offline mode: SQL is printed, no connection."""
     cfg = pg_store._alembic_config("postgresql://u@h/db")
-    pg_store.alembic_command.upgrade(cfg, "head", sql=True)
+    alembic_command.upgrade(cfg, "head", sql=True)
     out = capsys.readouterr().out
     for table in ("slack_channels", "slack_users", "slack_messages"):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in out
@@ -103,47 +108,51 @@ def test_migrations_render_offline_sql(capsys) -> None:
 
 
 def test_migrations_refuse_to_run_without_url() -> None:
-    cfg = pg_store.AlembicConfig()
+    cfg = AlembicConfig()
     cfg.set_main_option("script_location", "slack2rag:migrations")
-    with pytest.raises(RuntimeError, match="sqlalchemy.url is not set"):
-        pg_store.alembic_command.upgrade(cfg, "head", sql=True)
+    with pytest.raises(RuntimeError, match=r"sqlalchemy\.url is not set"):
+        alembic_command.upgrade(cfg, "head", sql=True)
 
 
 # ── schema_revision / check_schema ───────────────────────────────────────────
 
 
-def _results(conn, *rows) -> None:
+def _results(conn: MagicMock, *rows: tuple[str | None] | None) -> None:
     """Make successive conn.execute(...).fetchone() calls return *rows*."""
     conn.execute.return_value.fetchone.side_effect = list(rows)
 
 
 @pytest.mark.parametrize("regclass_row", [None, (None,)])
-def test_schema_revision_none_when_never_migrated(conn, regclass_row) -> None:
+def test_schema_revision_none_when_never_migrated(
+    conn: MagicMock, regclass_row: tuple[None] | None
+) -> None:
     _results(conn, regclass_row)
     assert PgStore("dsn").schema_revision() is None
     assert conn.execute.call_count == 1
     assert "to_regclass('alembic_version')" in conn.execute.call_args.args[0]
 
 
-def test_schema_revision_none_when_version_table_empty(conn) -> None:
+def test_schema_revision_none_when_version_table_empty(conn: MagicMock) -> None:
     _results(conn, ("alembic_version",), None)
     assert PgStore("dsn").schema_revision() is None
 
 
-def test_schema_revision_returns_version(conn) -> None:
+def test_schema_revision_returns_version(conn: MagicMock) -> None:
     _results(conn, ("alembic_version",), ("0001",))
     assert PgStore("dsn").schema_revision() == "0001"
     assert "SELECT version_num FROM alembic_version" in conn.execute.call_args.args[0]
 
 
-def test_check_schema_passes_at_head(monkeypatch) -> None:
+def test_check_schema_passes_at_head(monkeypatch: pytest.MonkeyPatch) -> None:
     store = PgStore("dsn")
     monkeypatch.setattr(store, "schema_revision", lambda: pg_store.head_revision())
     store.check_schema()
 
 
-@pytest.mark.parametrize("revision,shown", [(None, "none"), ("0000", "0000")])
-def test_check_schema_raises_when_not_at_head(monkeypatch, revision, shown) -> None:
+@pytest.mark.parametrize(("revision", "shown"), [(None, "none"), ("0000", "0000")])
+def test_check_schema_raises_when_not_at_head(
+    monkeypatch: pytest.MonkeyPatch, revision: str | None, shown: str
+) -> None:
     store = PgStore("dsn")
     monkeypatch.setattr(store, "schema_revision", lambda: revision)
     with pytest.raises(
@@ -155,7 +164,7 @@ def test_check_schema_raises_when_not_at_head(monkeypatch, revision, shown) -> N
 # ── single upserts ───────────────────────────────────────────────────────────
 
 
-def test_upsert_channel(conn) -> None:
+def test_upsert_channel(conn: MagicMock) -> None:
     ch = {"id": "C1", "name": "eng", "topic": {"value": "t"}}
     PgStore("dsn").upsert_channel(ch)
     [(sql, params)] = _executed(conn)
@@ -166,14 +175,16 @@ def test_upsert_channel(conn) -> None:
     conn.commit.assert_called_once()
 
 
-def test_upsert_channel_missing_id(conn, caplog) -> None:
+def test_upsert_channel_missing_id(
+    conn: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
     with caplog.at_level(logging.WARNING, logger="slack2rag.pg_store"):
         PgStore("dsn").upsert_channel({"name": "noid"})
     conn.connect.assert_not_called()
     assert "upsert_channel: missing id" in caplog.text
 
 
-def test_upsert_user(conn) -> None:
+def test_upsert_user(conn: MagicMock) -> None:
     user = {"id": "U1", "name": "alice"}
     PgStore("dsn").upsert_user(user)
     [(sql, params)] = _executed(conn)
@@ -183,14 +194,16 @@ def test_upsert_user(conn) -> None:
     conn.commit.assert_called_once()
 
 
-def test_upsert_user_missing_id(conn, caplog) -> None:
+def test_upsert_user_missing_id(
+    conn: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
     with caplog.at_level(logging.WARNING, logger="slack2rag.pg_store"):
         PgStore("dsn").upsert_user({"id": ""})
     conn.connect.assert_not_called()
     assert "upsert_user: missing id" in caplog.text
 
 
-def test_upsert_message(conn) -> None:
+def test_upsert_message(conn: MagicMock) -> None:
     msg = {"ts": "1.0", "text": "hi"}
     PgStore("dsn").upsert_message("C1", msg)
     [(sql, params)] = _executed(conn)
@@ -201,14 +214,16 @@ def test_upsert_message(conn) -> None:
     conn.commit.assert_called_once()
 
 
-def test_upsert_message_missing_ts(conn, caplog) -> None:
+def test_upsert_message_missing_ts(
+    conn: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
     with caplog.at_level(logging.WARNING, logger="slack2rag.pg_store"):
         PgStore("dsn").upsert_message("C1", {"text": "no ts"})
     conn.connect.assert_not_called()
     assert "upsert_message: missing ts" in caplog.text
 
 
-def test_connection_errors_propagate(conn) -> None:
+def test_connection_errors_propagate(conn: MagicMock) -> None:
     conn.connect.side_effect = RuntimeError("db down")
     with pytest.raises(RuntimeError, match="db down"):
         PgStore("dsn").upsert_user({"id": "U1"})
@@ -217,8 +232,13 @@ def test_connection_errors_propagate(conn) -> None:
 # ── bulk_upsert_users ────────────────────────────────────────────────────────
 
 
-def test_bulk_upsert_users_filters_missing_ids(conn) -> None:
-    users = [{"id": "U1"}, {"name": "noid"}, {"id": ""}, {"id": "U2", "x": 1}]
+def test_bulk_upsert_users_filters_missing_ids(conn: MagicMock) -> None:
+    users: list[dict[str, object]] = [
+        {"id": "U1"},
+        {"name": "noid"},
+        {"id": ""},
+        {"id": "U2", "x": 1},
+    ]
     PgStore("dsn").bulk_upsert_users(users)
     conn.cur.executemany.assert_called_once()
     sql, rows = conn.cur.executemany.call_args.args
@@ -229,7 +249,9 @@ def test_bulk_upsert_users_filters_missing_ids(conn) -> None:
 
 
 @pytest.mark.parametrize("users", [[], [{"name": "a"}, {"id": None}]])
-def test_bulk_upsert_users_noop(conn, users) -> None:
+def test_bulk_upsert_users_noop(
+    conn: MagicMock, users: list[dict[str, object]]
+) -> None:
     PgStore("dsn").bulk_upsert_users(users)
     conn.connect.assert_not_called()
 
@@ -237,9 +259,9 @@ def test_bulk_upsert_users_noop(conn, users) -> None:
 # ── persist_channel_messages_and_users ───────────────────────────────────────
 
 
-def test_persist_channel_messages_and_users(monkeypatch) -> None:
+def test_persist_channel_messages_and_users(monkeypatch: pytest.MonkeyPatch) -> None:
     store = PgStore("dsn")
-    calls: list = []
+    calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         store, "upsert_channel", lambda ch: calls.append(("channel", ch["id"]))
     )
@@ -254,7 +276,7 @@ def test_persist_channel_messages_and_users(monkeypatch) -> None:
     )
 
     root = {"ts": "1.0", "user": "U1"}
-    replies = [
+    replies: list[dict[str, object]] = [
         {"ts": "1.1", "user": "U2"},
         {"ts": "1.2", "user": "U1"},  # duplicate user
         {"ts": "1.3", "user": "U_GONE"},
@@ -276,7 +298,7 @@ def test_persist_channel_messages_and_users(monkeypatch) -> None:
     ]
 
 
-def test_persist_without_channel_id_is_noop(conn) -> None:
+def test_persist_without_channel_id_is_noop(conn: MagicMock) -> None:
     slack = MagicMock()
     PgStore("dsn").persist_channel_messages_and_users(
         slack, {"name": "x"}, {"ts": "1"}, []
@@ -285,7 +307,7 @@ def test_persist_without_channel_id_is_noop(conn) -> None:
     slack.get_user_record.assert_not_called()
 
 
-def test_persist_end_to_end_with_mocked_psycopg(conn) -> None:
+def test_persist_end_to_end_with_mocked_psycopg(conn: MagicMock) -> None:
     slack = MagicMock()
     slack.get_user_record.return_value = {"id": "U1"}
     PgStore("dsn").persist_channel_messages_and_users(

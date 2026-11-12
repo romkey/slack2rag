@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import signal
 import threading
+import time
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, NoReturn, TypedDict, Unpack
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,22 +19,61 @@ import pytest
 from slack2rag import __version__, main
 from slack2rag.config import Config, ConfigError
 from slack2rag.embedder import EmbeddingError
-from slack2rag.pg_store import SchemaError
+from slack2rag.pg_store import PgStore, SchemaError
 from slack2rag.processor import ChannelStats
+from slack2rag.processor import SlackObject as JsonDict
 from slack2rag.state import SyncState
 
 # ── shared fixtures ──────────────────────────────────────────────────────────
 
 
-def _cfg(tmp_path, **overrides) -> Config:
-    base = dict(
-        slack_bot_token="xoxb-test",
+# A made-up Slack bot token; nothing here talks to Slack.
+FAKE_BOT_CREDENTIAL = "xoxb-test"
+
+# Keyword arguments build_documents was called with, one dict per call.
+BuildCalls = list[dict[str, Any]]
+
+
+class _ConfigOverrides(TypedDict, total=False):
+    """Config fields a test may override (all of them)."""
+
+    slack_bot_token: str
+    qdrant_url: str
+    qdrant_collection: str
+    database_url: str
+    slack_channels: str
+    slack_channel_blacklist: str
+    llm_base_url: str
+    llm_api_key: str
+    embedding_model: str
+    embedding_prefix: str
+    embedding_context_length: int
+    sync_interval_minutes: int
+    run_once: bool
+    state_file: str
+    batch_size: int
+    api_pause: float
+    min_message_length: int
+    score_threshold: float
+    hybrid_search: bool
+    thread_update_lookback_hours: int
+    reaction_boost_threshold: int
+    eval_test: bool
+    eval_prompt: str
+    eval_model: str
+    eval_base_url: str
+    eval_api_key: str
+    log_level: str
+
+
+def _cfg(tmp_path: Path, **overrides: Unpack[_ConfigOverrides]) -> Config:
+    base = Config(
+        slack_bot_token=FAKE_BOT_CREDENTIAL,
         state_file=str(tmp_path / "data" / "state.json"),
         batch_size=50,
         api_pause=0.0,
     )
-    base.update(overrides)
-    return Config(**base)
+    return dataclasses.replace(base, **overrides)
 
 
 def _doc(text: str) -> SimpleNamespace:
@@ -38,11 +81,12 @@ def _doc(text: str) -> SimpleNamespace:
 
 
 @pytest.fixture
-def fake_build(monkeypatch):
-    """Replace processor.build_documents with a recorder that returns one doc per message."""
-    calls: list[dict] = []
+def fake_build(monkeypatch: pytest.MonkeyPatch) -> BuildCalls:
+    """Replace build_documents with a recorder returning one doc per message."""
+    calls: BuildCalls = []
 
-    def fake_build_documents(**kwargs):
+    # Any: stands in for build_documents, whose keyword arguments vary in type.
+    def fake_build_documents(**kwargs: Any) -> list[SimpleNamespace]:
         calls.append(kwargs)
         return [_doc(f"doc-{kwargs['root_msg']['ts']}")]
 
@@ -51,7 +95,8 @@ def fake_build(monkeypatch):
 
 
 def _slack(
-    messages: list[dict] | None = None, replies: dict | None = None
+    messages: list[JsonDict] | None = None,
+    replies: dict[str, list[JsonDict]] | None = None,
 ) -> MagicMock:
     slack = MagicMock()
     msgs = messages or []
@@ -81,11 +126,13 @@ def _embedder() -> MagicMock:
 # ── _build_docs_for_message ──────────────────────────────────────────────────
 
 
-def test_build_docs_aggregates_reactions_and_attachments(tmp_path, fake_build) -> None:
+def test_build_docs_aggregates_reactions_and_attachments(
+    tmp_path: Path, fake_build: BuildCalls
+) -> None:
     cfg = _cfg(tmp_path, min_message_length=5, reaction_boost_threshold=2)
     slack = _slack()
     msg = {"ts": "1.0", "reactions": [{"name": "+1"}], "files": ["a.png"]}
-    replies = [
+    replies: list[JsonDict] = [
         {
             "ts": "1.1",
             "reactions": [{"name": "tada"}, {"name": "eyes"}],
@@ -114,9 +161,11 @@ def test_build_docs_aggregates_reactions_and_attachments(tmp_path, fake_build) -
 # ── sync_channel ─────────────────────────────────────────────────────────────
 
 
-def test_sync_channel_indexes_batches_and_advances_cursor(tmp_path, fake_build) -> None:
+def test_sync_channel_indexes_batches_and_advances_cursor(
+    tmp_path: Path, fake_build: BuildCalls
+) -> None:
     cfg = _cfg(tmp_path, batch_size=2)
-    msgs = [
+    msgs: list[JsonDict] = [
         {"ts": "100.0", "user": "U1", "text": "deploy pipeline broken"},
         {
             "ts": "300.0",
@@ -169,18 +218,19 @@ def test_sync_channel_indexes_batches_and_advances_cursor(tmp_path, fake_build) 
     assert first.kwargs["sparse_vectors"] == [{"i": "doc-100.0"}, {"i": "doc-300.0"}]
     slack.get_thread_replies.assert_called_once_with("C1", "300.0")
     assert state.get_cursor("C1") == "500.0"
-    assert json.loads(open(cfg.state_file).read()) == {"C1": "500.0"}
+    assert json.loads(Path(cfg.state_file).read_text()) == {"C1": "500.0"}
 
     assert stats.user_counts == Counter({"U1": 3, "U2": 1, "U3": 1})
     assert stats.token_counts["deploy"] == 3
     assert sorted(stats.timestamps) == [100.0, 200.0, 300.0, 400.0, 500.0]
     assert pg.persist_channel_messages_and_users.call_count == 5
     _, _, root, rep = pg.persist_channel_messages_and_users.call_args_list[1].args
-    assert root["ts"] == "300.0" and len(rep) == 2
+    assert root["ts"] == "300.0"
+    assert len(rep) == 2
 
 
 def test_sync_channel_uses_cursor_and_no_new_messages(
-    tmp_path, fake_build, caplog
+    tmp_path: Path, fake_build: BuildCalls, caplog: pytest.LogCaptureFixture
 ) -> None:
     cfg = _cfg(tmp_path)
     state = SyncState(cfg.state_file)
@@ -201,7 +251,9 @@ def test_sync_channel_uses_cursor_and_no_new_messages(
     assert "#C1  no new messages" in caplog.text
 
 
-def test_sync_channel_without_sparse_or_pg(tmp_path, fake_build) -> None:
+def test_sync_channel_without_sparse_or_pg(
+    tmp_path: Path, fake_build: BuildCalls
+) -> None:
     cfg = _cfg(tmp_path)
     state = SyncState(cfg.state_file)
     slack = _slack([{"ts": "10.0", "user": "U1", "text": "hello"}])
@@ -217,8 +269,10 @@ def test_sync_channel_without_sparse_or_pg(tmp_path, fake_build) -> None:
 # ── refresh_threads ──────────────────────────────────────────────────────────
 
 
-def test_refresh_threads(tmp_path, fake_build, monkeypatch) -> None:
-    monkeypatch.setattr(main.time, "time", lambda: 10_000.0)
+def test_refresh_threads(
+    tmp_path: Path, fake_build: BuildCalls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 10_000.0)
     cfg = _cfg(tmp_path, batch_size=1)
     msgs = [
         {"ts": "1.0", "reply_count": 0},
@@ -253,7 +307,9 @@ def test_refresh_threads(tmp_path, fake_build, monkeypatch) -> None:
     assert pg.persist_channel_messages_and_users.call_count == 2
 
 
-def test_refresh_threads_flushes_remainder(tmp_path, fake_build) -> None:
+def test_refresh_threads_flushes_remainder(
+    tmp_path: Path, fake_build: BuildCalls
+) -> None:
     cfg = _cfg(tmp_path, batch_size=10)
     slack = _slack([{"ts": "2.0", "reply_count": 1, "thread_ts": "2.0"}])
     store = MagicMock()
@@ -263,7 +319,7 @@ def test_refresh_threads_flushes_remainder(tmp_path, fake_build) -> None:
     store.upsert.assert_called_once()
 
 
-def test_refresh_threads_nothing(tmp_path, fake_build) -> None:
+def test_refresh_threads_nothing(tmp_path: Path, fake_build: BuildCalls) -> None:
     cfg = _cfg(tmp_path)
     store = MagicMock()
     assert (
@@ -276,7 +332,7 @@ def test_refresh_threads_nothing(tmp_path, fake_build) -> None:
 # ── channel stats persistence ────────────────────────────────────────────────
 
 
-def test_channel_stats_roundtrip(tmp_path) -> None:
+def test_channel_stats_roundtrip(tmp_path: Path) -> None:
     path = str(tmp_path / "nested" / "stats.json")
     cs = ChannelStats()
     cs.token_counts.update({"deploy": 3})
@@ -290,18 +346,20 @@ def test_channel_stats_roundtrip(tmp_path) -> None:
     assert loaded["C1"].timestamps == [1.0, 2.0]
 
 
-def test_load_channel_stats_missing_and_corrupt(tmp_path) -> None:
+def test_load_channel_stats_missing_and_corrupt(tmp_path: Path) -> None:
     assert main._load_channel_stats(str(tmp_path / "nope.json")) == {}
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
     assert main._load_channel_stats(str(bad)) == {}
 
 
-def test_save_channel_stats_oserror_is_logged(tmp_path, monkeypatch, caplog) -> None:
-    def boom(*a, **k):
+def test_save_channel_stats_oserror_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def boom(*a: object, **k: object) -> NoReturn:
         raise OSError("disk full")
 
-    monkeypatch.setattr("builtins.open", boom)
+    monkeypatch.setattr(Path, "open", boom)
     with caplog.at_level(logging.WARNING, logger="slack2rag"):
         main._save_channel_stats(str(tmp_path / "s.json"), {"C1": ChannelStats()})
     assert "Could not save channel stats: disk full" in caplog.text
@@ -310,22 +368,34 @@ def test_save_channel_stats_oserror_is_logged(tmp_path, monkeypatch, caplog) -> 
 # ── _index_summaries ─────────────────────────────────────────────────────────
 
 
-def test_index_summaries(monkeypatch) -> None:
-    calls: dict[str, list] = {"channel": [], "workspace": [], "user": [], "team": []}
+def test_index_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, list[Any]] = {
+        "channel": [],
+        "workspace": [],
+        "user": [],
+        "team": [],
+    }
 
-    def chan(ch, count, stats=None, get_user_name=None):
+    def chan(
+        ch: JsonDict,
+        count: int,
+        stats: ChannelStats | None = None,
+        get_user_name: object = None,
+    ) -> SimpleNamespace:
         calls["channel"].append((ch["id"], count, stats, get_user_name))
         return _doc(f"chan-{ch['id']}")
 
-    def ws(channels, counts):
+    def ws(channels: list[JsonDict], counts: dict[str, int]) -> SimpleNamespace:
         calls["workspace"].append(dict(counts))
         return _doc("ws")
 
-    def user(profile, active_channels=None):
+    def user(
+        profile: JsonDict, active_channels: list[str] | None = None
+    ) -> SimpleNamespace:
         calls["user"].append((profile["user_id"], active_channels))
         return _doc(f"user-{profile['user_id']}")
 
-    def team(profiles):
+    def team(profiles: list[JsonDict]) -> SimpleNamespace:
         calls["team"].append(len(profiles))
         return _doc("team")
 
@@ -340,7 +410,7 @@ def test_index_summaries(monkeypatch) -> None:
     # stats for a channel no longer in the list -> name falls back to id
     s3 = ChannelStats(user_counts=Counter({"U2": 2}))
     stats = {"C1": s1, "C2": s2, "COLD": s3}
-    profiles = {
+    profiles: dict[str, JsonDict] = {
         "U1": {"user_id": "U1"},
         "U2": {"user_id": "U2"},
         "U3": {"user_id": "U3"},
@@ -375,7 +445,9 @@ def test_index_summaries(monkeypatch) -> None:
 # ── _get_channels ────────────────────────────────────────────────────────────
 
 
-def test_get_channels_include_list_and_blacklist(tmp_path, caplog) -> None:
+def test_get_channels_include_list_and_blacklist(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     cfg = _cfg(
         tmp_path,
         slack_channels="eng, ops,random",
@@ -395,7 +467,7 @@ def test_get_channels_include_list_and_blacklist(tmp_path, caplog) -> None:
     assert "Blacklist: skipping 2 channel(s): C_OPS, random" in caplog.text
 
 
-def test_get_channels_all_public_no_blacklist(tmp_path) -> None:
+def test_get_channels_all_public_no_blacklist(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     slack = MagicMock()
     slack.get_public_channels.return_value = [{"id": "C1"}]
@@ -403,7 +475,9 @@ def test_get_channels_all_public_no_blacklist(tmp_path) -> None:
     slack.get_public_channels.assert_called_once_with(None)
 
 
-def test_get_channels_blacklist_no_match(tmp_path, caplog) -> None:
+def test_get_channels_blacklist_no_match(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     cfg = _cfg(tmp_path, slack_channel_blacklist="zzz")
     slack = MagicMock()
     slack.get_public_channels.return_value = [{"id": "C1", "name": "a"}]
@@ -415,7 +489,9 @@ def test_get_channels_blacklist_no_match(tmp_path, caplog) -> None:
 # ── run_once ─────────────────────────────────────────────────────────────────
 
 
-def test_run_once_no_channels(tmp_path, monkeypatch, caplog) -> None:
+def test_run_once_no_channels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     cfg = _cfg(tmp_path)
     slack = MagicMock()
     slack.get_public_channels.return_value = []
@@ -427,7 +503,7 @@ def test_run_once_no_channels(tmp_path, monkeypatch, caplog) -> None:
     assert "No accessible public channels found" in caplog.text
 
 
-def test_run_once_full_cycle(tmp_path, monkeypatch) -> None:
+def test_run_once_full_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _cfg(tmp_path, thread_update_lookback_hours=6)
     stats_file = tmp_path / "data" / "channel_stats.json"
     existing = ChannelStats(user_counts=Counter({"U1": 1}))
@@ -437,7 +513,9 @@ def test_run_once_full_cycle(tmp_path, monkeypatch) -> None:
     slack.get_public_channels.return_value = [{"id": "C1"}, {"id": "C2"}]
     slack.get_user_profiles.return_value = {"U1": {"user_id": "U1"}}
 
-    def fake_sync(ch, *args, pg=None):
+    def fake_sync(
+        ch: JsonDict, *args: object, pg: object = None
+    ) -> tuple[int, ChannelStats]:
         return 3, ChannelStats(user_counts=Counter({"U9": 2}))
 
     refresh = MagicMock(return_value=0)
@@ -463,7 +541,9 @@ def test_run_once_full_cycle(tmp_path, monkeypatch) -> None:
     assert profiles_arg == {"U1": {"user_id": "U1"}}
 
 
-def test_run_once_skips_thread_refresh_when_disabled(tmp_path, monkeypatch) -> None:
+def test_run_once_skips_thread_refresh_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg = _cfg(tmp_path)
     slack = MagicMock()
     slack.get_public_channels.return_value = [{"id": "C1"}]
@@ -478,7 +558,9 @@ def test_run_once_skips_thread_refresh_when_disabled(tmp_path, monkeypatch) -> N
 # ── _check_llm ───────────────────────────────────────────────────────────────
 
 
-def test_check_llm_embedding_ok_no_eval(tmp_path, monkeypatch, caplog) -> None:
+def test_check_llm_embedding_ok_no_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     emb = MagicMock()
     emb.embed.return_value = [[0.25, 0.5]]
     emb_cls = MagicMock(return_value=emb)
@@ -509,7 +591,9 @@ def test_check_llm_embedding_ok_no_eval(tmp_path, monkeypatch, caplog) -> None:
     assert "Evaluator: skipped" in caplog.text
 
 
-def test_check_llm_embedding_empty_vector(tmp_path, monkeypatch, caplog) -> None:
+def test_check_llm_embedding_empty_vector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     emb = MagicMock()
     emb.embed.return_value = [[]]
     monkeypatch.setattr(main, "Embedder", MagicMock(return_value=emb))
@@ -518,7 +602,9 @@ def test_check_llm_embedding_empty_vector(tmp_path, monkeypatch, caplog) -> None
     assert "dimension=0, sample[0]=0.0000" in caplog.text
 
 
-def test_check_llm_embedding_failure_and_eval_ok(tmp_path, monkeypatch, caplog) -> None:
+def test_check_llm_embedding_failure_and_eval_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setattr(main, "Embedder", MagicMock(side_effect=EmbeddingError("down")))
     chat = MagicMock(return_value='  {"ok": true}\n')
     monkeypatch.setattr(main, "_chat_completion", chat)
@@ -544,7 +630,7 @@ def test_check_llm_embedding_failure_and_eval_ok(tmp_path, monkeypatch, caplog) 
 
 
 def test_check_llm_eval_failure_uses_llm_fallback(
-    tmp_path, monkeypatch, caplog
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     emb = MagicMock()
     emb.embed.return_value = [[1.0]]
@@ -569,7 +655,7 @@ def test_parse_args() -> None:
     assert main._parse_args(["--check"]).check is True
 
 
-def test_version_flag(capsys) -> None:
+def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         main._parse_args(["--version"])
     assert exc.value.code == 0
@@ -583,14 +669,16 @@ def test_unknown_arg_rejected() -> None:
 
 
 @pytest.fixture(autouse=True)
-def fresh_stop_event(monkeypatch):
-    """Give every test its own unset stop_event so a stop in one can't leak into another."""
+def fresh_stop_event(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Give every test its own unset stop_event so a stop can't leak between tests."""
     event = threading.Event()
     monkeypatch.setattr(main, "stop_event", event)
     return event
 
 
-def test_request_stop_sets_stop_event(fresh_stop_event, caplog) -> None:
+def test_request_stop_sets_stop_event(
+    fresh_stop_event: threading.Event, caplog: pytest.LogCaptureFixture
+) -> None:
     with caplog.at_level(logging.INFO, logger="slack2rag"):
         main._request_stop(signal.SIGTERM, None)
     assert fresh_stop_event.is_set()
@@ -598,7 +686,9 @@ def test_request_stop_sets_stop_event(fresh_stop_event, caplog) -> None:
 
 
 @pytest.fixture
-def app(monkeypatch, tmp_path, fresh_stop_event):
+def app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fresh_stop_event: threading.Event
+) -> SimpleNamespace:
     """Patch all external collaborators used by main.main()."""
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("STATE_FILE", str(tmp_path / "state.json"))
@@ -641,7 +731,7 @@ def app(monkeypatch, tmp_path, fresh_stop_event):
     monkeypatch.setattr(fresh_stop_event, "wait", m.wait)
 
     monkeypatch.setattr(main, "SlackClient", m.slack_cls)
-    monkeypatch.setattr(main.PgStore, "from_url", m.pg_from_url)
+    monkeypatch.setattr(PgStore, "from_url", m.pg_from_url)
     monkeypatch.setattr(main, "Embedder", m.embedder_cls)
     monkeypatch.setattr(main, "SparseEncoder", m.sparse_cls)
     monkeypatch.setattr(main, "VectorStore", m.store_cls)
@@ -649,34 +739,37 @@ def app(monkeypatch, tmp_path, fresh_stop_event):
     monkeypatch.setattr(main, "run_once", m.run_once)
     monkeypatch.setattr(main, "run_eval", m.run_eval)
     monkeypatch.setattr(main, "_check_llm", m.check)
-    monkeypatch.setattr(main.signal, "signal", m.signal)
+    monkeypatch.setattr(signal, "signal", m.signal)
     m.env = monkeypatch
     return m
 
 
-@pytest.mark.parametrize("ok,code", [(True, 0), (False, 1)])
-def test_main_check_flag_exit_codes(app, ok, code) -> None:
+@pytest.mark.parametrize(("ok", "code"), [(True, 0), (False, 1)])
+def test_main_check_flag_exit_codes(app: SimpleNamespace, ok: bool, code: int) -> None:
     app.check.return_value = ok
     assert main.main(["--check"]) == code
     app.check.assert_called_once()
     app.slack_cls.assert_not_called()
 
 
-def test_main_missing_token(monkeypatch) -> None:
+def test_main_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     with pytest.raises(ConfigError, match="SLACK_BOT_TOKEN"):
         main.main([])
 
 
-def test_main_uses_given_config_instead_of_env(app, tmp_path) -> None:
+def test_main_uses_given_config_instead_of_env(
+    app: SimpleNamespace, tmp_path: Path
+) -> None:
     app.env.delenv("SLACK_BOT_TOKEN")
-    cfg = _cfg(tmp_path, slack_bot_token="xoxb-given", run_once=True)
+    given = FAKE_BOT_CREDENTIAL + "-given"
+    cfg = _cfg(tmp_path, slack_bot_token=given, run_once=True)
     assert main.main([], cfg=cfg) == 0
-    app.slack_cls.assert_called_once_with("xoxb-given", api_pause=0.0)
+    app.slack_cls.assert_called_once_with(given, api_pause=0.0)
     assert app.run_once.call_args.args[0] is cfg
 
 
-def test_main_run_once_mode(app) -> None:
+def test_main_run_once_mode(app: SimpleNamespace) -> None:
     app.env.setenv("RUN_ONCE", "true")
     app.env.setenv("SLACK_API_PAUSE", "0.3")
     assert main.main([]) == 0
@@ -694,14 +787,16 @@ def test_main_run_once_mode(app) -> None:
     )
     app.run_once.assert_called_once()
     args, kwargs = app.run_once.call_args
-    assert args[1] is app.slack and args[2] is app.store and args[3] is app.embedder
+    assert args[1] is app.slack
+    assert args[2] is app.store
+    assert args[3] is app.embedder
     assert args[4] is None
     assert kwargs["pg"] is None
     app.wait.assert_not_called()
     app.signal.assert_not_called()
 
 
-def test_main_with_postgres_and_hybrid(app) -> None:
+def test_main_with_postgres_and_hybrid(app: SimpleNamespace) -> None:
     app.env.setenv("RUN_ONCE", "1")
     app.env.setenv("HYBRID_SEARCH", "yes")
     app.env.setenv("DATABASE_URL", "postgresql://db/x")
@@ -719,7 +814,9 @@ def test_main_with_postgres_and_hybrid(app) -> None:
     assert app.run_once.call_args.kwargs["pg"] is app.pg
 
 
-def test_main_postgres_schema_out_of_date_returns_one(app, caplog) -> None:
+def test_main_postgres_schema_out_of_date_returns_one(
+    app: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
     app.env.setenv("DATABASE_URL", "postgresql://db/x")
     app.pg_from_url.return_value = app.pg
     app.pg.check_schema.side_effect = SchemaError("run `slack2rag migrate` first")
@@ -733,7 +830,9 @@ def test_main_postgres_schema_out_of_date_returns_one(app, caplog) -> None:
     app.run_once.assert_not_called()
 
 
-def test_main_embedder_failure_returns_one(app, caplog) -> None:
+def test_main_embedder_failure_returns_one(
+    app: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
     app.embedder_cls.side_effect = EmbeddingError("no model")
     with caplog.at_level(logging.ERROR, logger="slack2rag"):
         assert main.main([]) == 1
@@ -742,20 +841,23 @@ def test_main_embedder_failure_returns_one(app, caplog) -> None:
     app.run_once.assert_not_called()
 
 
-def test_main_loop_survives_errors_and_waits(app, caplog) -> None:
+def test_main_loop_survives_errors_and_waits(
+    app: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
     app.env.setenv("SYNC_INTERVAL_MINUTES", "2")
     app.run_once.side_effect = [
         EmbeddingError("embed down"),
         RuntimeError("qdrant down"),
         None,
     ]
-    waits = iter([None, None, app.stop_event.set])
+    stop_event: threading.Event = app.stop_event
+    waits = iter([None, None, stop_event.set])
 
-    def fake_wait(timeout):
+    def fake_wait(timeout: float | None) -> bool:
         action = next(waits)
         if action:
             action()
-        return app.stop_event.is_set()
+        return stop_event.is_set()
 
     app.wait.side_effect = fake_wait
 
@@ -771,7 +873,9 @@ def test_main_loop_survives_errors_and_waits(app, caplog) -> None:
     assert "Stopped" in caplog.text
 
 
-def test_main_loop_stops_without_waiting_when_stopped_mid_cycle(app, caplog) -> None:
+def test_main_loop_stops_without_waiting_when_stopped_mid_cycle(
+    app: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
     app.run_once.side_effect = lambda *a, **k: app.stop_event.set()
     with caplog.at_level(logging.INFO, logger="slack2rag"):
         assert main.main([]) == 0
@@ -781,14 +885,14 @@ def test_main_loop_stops_without_waiting_when_stopped_mid_cycle(app, caplog) -> 
     assert "Stopped" in caplog.text
 
 
-def test_main_loop_does_not_run_when_already_stopped(app) -> None:
+def test_main_loop_does_not_run_when_already_stopped(app: SimpleNamespace) -> None:
     app.stop_event.set()
     assert main.main([]) == 0
     app.run_once.assert_not_called()
     app.signal.assert_called_once()
 
 
-def test_main_eval_mode(app) -> None:
+def test_main_eval_mode(app: SimpleNamespace) -> None:
     app.env.setenv("EVAL_TEST", "1")
     app.env.setenv("EVAL_PROMPT", "rate it")
     app.env.setenv("EVAL_MODEL", "judge")
@@ -813,10 +917,12 @@ def test_main_eval_mode(app) -> None:
 
 
 @pytest.mark.parametrize(
-    "prompt,model",
+    ("prompt", "model"),
     [("", "judge"), ("rate it", "")],
 )
-def test_main_eval_mode_requires_prompt_and_model(app, prompt, model) -> None:
+def test_main_eval_mode_requires_prompt_and_model(
+    app: SimpleNamespace, prompt: str, model: str
+) -> None:
     app.env.setenv("EVAL_TEST", "1")
     app.env.setenv("EVAL_PROMPT", prompt)
     app.env.setenv("EVAL_MODEL", model)

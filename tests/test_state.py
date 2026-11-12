@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
+
+import pytest
 
 from slack2rag.state import SyncState
 
 
-def test_missing_file_starts_empty(tmp_path) -> None:
+def test_missing_file_starts_empty(tmp_path: Path) -> None:
     state = SyncState(str(tmp_path / "state.json"))
     assert state.get_cursor("C1") is None
     # Constructing must not create the file.
     assert not (tmp_path / "state.json").exists()
 
 
-def test_set_cursor_persists_and_reloads(tmp_path) -> None:
+def test_set_cursor_persists_and_reloads(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     state = SyncState(str(path))
     state.set_cursor("C1", "1700000000.000100")
@@ -33,7 +36,7 @@ def test_set_cursor_persists_and_reloads(tmp_path) -> None:
     assert reloaded.get_cursor("C3") is None
 
 
-def test_set_cursor_overwrites_existing_value(tmp_path) -> None:
+def test_set_cursor_overwrites_existing_value(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     state = SyncState(str(path))
     state.set_cursor("C1", "1.0")
@@ -42,13 +45,15 @@ def test_set_cursor_overwrites_existing_value(tmp_path) -> None:
     assert json.loads(path.read_text()) == {"C1": "2.0"}
 
 
-def test_loads_existing_file(tmp_path) -> None:
+def test_loads_existing_file(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text(json.dumps({"C9": "123.456"}))
     assert SyncState(str(path)).get_cursor("C9") == "123.456"
 
 
-def test_corrupt_file_logs_warning_and_starts_empty(tmp_path, caplog) -> None:
+def test_corrupt_file_logs_warning_and_starts_empty(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "state.json"
     path.write_text("{not valid json")
     with caplog.at_level(logging.WARNING, logger="slack2rag.state"):
@@ -61,7 +66,9 @@ def test_corrupt_file_logs_warning_and_starts_empty(tmp_path, caplog) -> None:
     assert json.loads(path.read_text()) == {"C1": "5.0"}
 
 
-def test_unreadable_path_logs_warning(tmp_path, caplog) -> None:
+def test_unreadable_path_logs_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     # A directory exists at the path, so open() raises an OSError.
     path = tmp_path / "state.json"
     path.mkdir()
@@ -71,21 +78,25 @@ def test_unreadable_path_logs_warning(tmp_path, caplog) -> None:
     assert "Could not read state file" in caplog.text
 
 
-def test_save_creates_parent_directories(tmp_path) -> None:
+def test_save_creates_parent_directories(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "deeper" / "state.json"
     state = SyncState(str(path))
     state.set_cursor("C1", "1.0")
     assert json.loads(path.read_text()) == {"C1": "1.0"}
 
 
-def test_save_with_bare_filename_uses_cwd(tmp_path, monkeypatch) -> None:
+def test_save_with_bare_filename_uses_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     state = SyncState("state.json")
     state.set_cursor("C1", "1.0")
     assert json.loads((tmp_path / "state.json").read_text()) == {"C1": "1.0"}
 
 
-def test_save_failure_logs_warning_but_keeps_memory(tmp_path, caplog) -> None:
+def test_save_failure_logs_warning_but_keeps_memory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "state.json"
     path.mkdir()  # writing to a directory raises IsADirectoryError (OSError)
     with caplog.at_level(logging.WARNING, logger="slack2rag.state"):

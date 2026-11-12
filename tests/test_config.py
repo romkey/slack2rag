@@ -2,31 +2,33 @@
 
 from __future__ import annotations
 
+import pytest
+
 from slack2rag.config import Config
 
 
-def test_database_url_from_env(monkeypatch) -> None:
+def test_database_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/app")
     cfg = Config.from_env()
     assert cfg.database_url == "postgresql://u:p@db:5432/app"
 
 
-def test_database_url_default_empty(monkeypatch) -> None:
+def test_database_url_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = Config.from_env()
     assert cfg.database_url == ""
 
 
-def test_embedding_prefix_from_env(monkeypatch) -> None:
+def test_embedding_prefix_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("EMBEDDING_PREFIX", "search_document:")
     cfg = Config.from_env()
     assert cfg.embedding_prefix == "search_document:"
 
 
-def test_llm_base_url_and_api_key_from_env(monkeypatch) -> None:
+def test_llm_base_url_and_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("LLM_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("LLM_API_KEY", "sk-secret")
@@ -39,7 +41,9 @@ def test_llm_base_url_and_api_key_from_env(monkeypatch) -> None:
     assert cfg.embedding_context_length == 8192
 
 
-def test_eval_endpoint_falls_back_to_llm_endpoint(monkeypatch) -> None:
+def test_eval_endpoint_falls_back_to_llm_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434/v1")
     monkeypatch.setenv("LLM_API_KEY", "local-key")
@@ -50,7 +54,7 @@ def test_eval_endpoint_falls_back_to_llm_endpoint(monkeypatch) -> None:
     assert cfg.effective_eval_api_key == "local-key"
 
 
-def test_eval_endpoint_overrides_llm_endpoint(monkeypatch) -> None:
+def test_eval_endpoint_overrides_llm_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434/v1")
     monkeypatch.setenv("LLM_API_KEY", "local-key")
