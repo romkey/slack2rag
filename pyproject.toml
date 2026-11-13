@@ -1,6 +1,6 @@
 [project]
 name = "slack2rag"
-version = "0.4.7"
+version = "0.5.0"
 description = "Index Slack channel messages into a Qdrant vector database for RAG."
 readme = "README.md"
 license = "MIT"
