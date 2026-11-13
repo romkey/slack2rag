@@ -15,8 +15,10 @@ by default a local
 [Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
 server running [ModernBERT](https://huggingface.co/nomic-ai/modernbert-embed-base),
 with OpenAI, [Ollama](https://ollama.com/), vLLM or LM Studio as
-alternatives. The optional message-quality evaluator uses the same API's
-chat completions.
+alternatives. An optional decision model, using the same API's chat
+completions, indexes only the messages that are useful resources (every
+message is still kept in PostgreSQL); so does the optional message-quality
+evaluator.
 
 > **AI disclosure:** This project was written by AI under human oversight,
 > following [these rules](https://github.com/romkey/python-ai-rules/blob/main/RULES.md).
@@ -37,6 +39,7 @@ Slack API  →  slack2rag  →  Qdrant  ←  any app, via Qdrant's REST API
 | `src/slack2rag/processor.py` | Slack messages → `Document`s: thread grouping, chunking, summaries |
 | `src/slack2rag/embedder.py` | OpenAI-compatible `/embeddings` client and the sparse (BM25-like) encoder |
 | `src/slack2rag/vector_store.py` | Qdrant collection setup, upsert, search and hybrid search |
+| `src/slack2rag/decider.py` | Decision model: asks a `/chat/completions` model whether a message is worth indexing |
 | `src/slack2rag/evaluator.py` | Eval mode: scores messages with an OpenAI-compatible `/chat/completions` model |
 | `src/slack2rag/pg_store.py`, `migrations/` | Optional PostgreSQL copy of raw Slack payloads, with Alembic migrations |
 | `src/slack2rag/state.py` | Per-channel sync cursors, as JSON on disk |
@@ -84,8 +87,8 @@ slack2rag migrate                create or upgrade the PostgreSQL schema
 slack2rag --version
 ```
 
-`--check` embeds a probe string and, if `EVAL_MODEL` is set, sends a tiny
-chat request, then exits 0 if both worked or 1 if not. Use it before a first
+`--check` embeds a probe string and, if `DECISION_MODEL` or `EVAL_MODEL` is
+set, sends each a tiny chat request, then exits 0 if all worked or 1 if not. Use it before a first
 full sync.
 
 `slack2rag query` options: `-n/--limit N`, `-c/--channel NAME_OR_ID`,
@@ -104,6 +107,12 @@ Top 3 of 14,823 indexed messages
   password". You'll get an email within a few minutes.
   🔗 https://myworkspace.slack.com/archives/C04ABCDEF/p1710234900123456
 ```
+
+With `DECISION_MODEL` set, each message (or whole thread) is first sent to
+that model with `DECISION_PROMPT`, which by default asks whether it shares
+knowledge, says where something is, how to find, get or use something, or
+how something works. Only messages it accepts are embedded into Qdrant;
+PostgreSQL still gets every message. See docs/configuration.md.
 
 Eval mode (`EVAL_TEST=true`) skips indexing and instead scores every message
 with `EVAL_MODEL` and `EVAL_PROMPT`, writing messages scoring 7 or more to

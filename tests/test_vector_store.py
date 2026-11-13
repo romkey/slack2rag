@@ -486,3 +486,17 @@ def test_in_memory_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert by_id[0]["text"] == "hello 2"
 
     assert store.search([1, 0, 0, 0], score_threshold=0.99)[0]["text"] == "hello 1"
+
+
+def test_delete_message_deletes_all_points_of_one_root_message(qc: MagicMock) -> None:
+    store = _store(qc)
+    store.delete_message("C0123456789", "12.5")
+
+    kwargs = qc.delete.call_args.kwargs
+    assert kwargs["collection_name"] == "slack"
+    assert kwargs["wait"] is True
+    must = kwargs["points_selector"].filter.must
+    assert [(c.key, c.match.value) for c in must] == [
+        ("channel_id", "C0123456789"),
+        ("ts", "12.5"),
+    ]

@@ -294,3 +294,78 @@ def test_eval_key_warning_follows_separate_eval_endpoint() -> None:
     )
     (warning,) = cfg.missing_api_key_warnings()
     assert "evaluator" in warning
+
+
+def test_decision_model_defaults_and_overrides() -> None:
+    from slack2rag.config import DEFAULT_DECISION_PROMPT
+
+    base = {"SLACK_BOT_TOKEN": "xoxb-test"}
+    cfg = Config.from_env(base)
+    assert cfg.decision_model == ""
+    assert cfg.decision_prompt == DEFAULT_DECISION_PROMPT
+
+    cfg = Config.from_env(
+        {**base, "DECISION_MODEL": " qwen3.5:9b ", "DECISION_PROMPT": "useful?"}
+    )
+    assert cfg.decision_model == "qwen3.5:9b"
+    assert cfg.decision_prompt == "useful?"
+
+    # An empty prompt falls back to the default rather than asking nothing.
+    assert Config.from_env({**base, "DECISION_PROMPT": "  "}).decision_prompt == (
+        DEFAULT_DECISION_PROMPT
+    )
+
+
+def test_decision_endpoint_falls_back_to_llm_endpoint() -> None:
+    cfg = Config(
+        slack_bot_token="xoxb-test",  # noqa: S106 dummy test token
+        llm_base_url="http://tei/v1",
+        llm_api_key="k1",
+    )
+    assert cfg.effective_decision_base_url == "http://tei/v1"
+    assert cfg.effective_decision_api_key == "k1"
+    cfg = Config.from_env(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "DECISION_BASE_URL": " https://api.openai.com/v1 ",
+            "DECISION_API_KEY": "k2",
+        }
+    )
+    assert cfg.effective_decision_base_url == "https://api.openai.com/v1"
+    assert cfg.effective_decision_api_key == "k2"
+
+
+def test_decision_key_warning_for_openai() -> None:
+    cfg = Config(
+        slack_bot_token="xoxb-test",  # noqa: S106 dummy test token
+        llm_base_url="http://tei/v1",
+        decision_model="gpt-5-nano",
+        decision_base_url="https://api.openai.com/v1",
+    )
+    (warning,) = cfg.missing_api_key_warnings()
+    assert "decision model" in warning
+    keyed = Config(
+        slack_bot_token="xoxb-test",  # noqa: S106 dummy test token
+        decision_model="gpt-5-nano",
+        decision_base_url="https://api.openai.com/v1",
+        decision_api_key="sk-x",
+    )
+    assert keyed.missing_api_key_warnings() == []
+
+
+@pytest.mark.parametrize(
+    ("env", "hours"),
+    [
+        ({}, 0),
+        ({"DECISION_MODEL": "m"}, 72),
+        ({"DECISION_MODEL": "m", "THREAD_UPDATE_LOOKBACK_HOURS": ""}, 72),
+        ({"DECISION_MODEL": "m", "THREAD_UPDATE_LOOKBACK_HOURS": "0"}, 0),
+        ({"DECISION_MODEL": "m", "THREAD_UPDATE_LOOKBACK_HOURS": "24"}, 24),
+        ({"DECISION_MODEL": "  ", "THREAD_UPDATE_LOOKBACK_HOURS": ""}, 0),
+    ],
+)
+def test_thread_refresh_defaults_on_with_decision_model(
+    env: dict[str, str], hours: int
+) -> None:
+    cfg = Config.from_env({"SLACK_BOT_TOKEN": "xoxb-test", **env})
+    assert cfg.thread_update_lookback_hours == hours

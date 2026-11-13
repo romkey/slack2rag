@@ -188,6 +188,23 @@ def _format_message(
 # ── public API ────────────────────────────────────────────────────────────────
 
 
+def format_thread(
+    root_msg: SlackObject,
+    replies: list[SlackObject],
+    resolve_text: StrTransform,
+    get_user_name: StrTransform,
+) -> str:
+    """The root message and its replies as "[name]: text" lines."""
+    lines = []
+    for msg in (root_msg, *replies):
+        line = _format_message(
+            msg, get_user_name(msg.get("user", "unknown")), resolve_text
+        )
+        if line:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def build_documents(
     root_msg: SlackObject,
     replies: list[SlackObject],

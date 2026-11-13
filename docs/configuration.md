@@ -54,9 +54,37 @@ dimensions, context lengths and prompts.
 |---|---|---|
 | `MIN_MESSAGE_LENGTH` | `20` | Standalone messages shorter than this many characters are skipped; threads are always kept. 0 disables |
 | `REACTION_BOOST_THRESHOLD` | `3` | Messages with at least this many reactions get `[highlighted by team]` prepended. 0 disables |
-| `THREAD_UPDATE_LOOKBACK_HOURS` | `0` | Re-index threads that gained replies within this many hours, after each sync. 0 disables; 24–72 is a good start |
+| `THREAD_UPDATE_LOOKBACK_HOURS` | `0`, or `72` with `DECISION_MODEL` | Re-index threads that gained replies within this many hours, after each sync. 0 disables; 24–72 is a good start |
 | `HYBRID_SEARCH` | `false` | `true` stores sparse keyword vectors too and searches with RRF fusion. Changing it needs a fresh collection |
 | `SCORE_THRESHOLD` | `0.0` | Minimum cosine similarity for `slack2rag query` results, ≥ 0. 0 disables |
+
+## Decision model (optional)
+
+Every message still goes to PostgreSQL; only messages the decision model
+accepts go to Qdrant.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DECISION_MODEL` | *(empty: index everything)* | Chat-completions model asked, for each message or whole thread, whether it is a useful resource for members. Rejected ones aren't embedded. If the model can't be reached (after 3 tries) the sync cycle fails and retries next interval, without moving the channel cursor; an unparseable answer counts as useful |
+| `DECISION_PROMPT` | the prompt in `.env.example` | What counts as useful, on one line. The channel, the message and the JSON answer format are appended |
+| `DECISION_BASE_URL` | `LLM_BASE_URL` | A different OpenAI-compatible endpoint for the decision model. Needed with the default TEI embeddings server, which has no chat models |
+| `DECISION_API_KEY` | `LLM_API_KEY` | Its API key |
+
+Suggested models: `qwen3.5:9b` (or `qwen3.5:4b`) or Gemma 4 E4B on Ollama;
+`gpt-5-nano` or `gpt-5-mini` on OpenAI. Messages shorter than
+`MIN_MESSAGE_LENGTH` are skipped before the model is asked. Messages
+indexed before the model was set stay in Qdrant: delete the collection and
+the state file to re-index everything through it. Refreshed threads
+that are now rejected are removed from Qdrant. `LOG_LEVEL=DEBUG` logs each
+verdict and its reason.
+
+A new question usually has no answer yet, so the decision model rejects it.
+Replies don't move the channel cursor, so the thread is only decided again
+by the thread refresh pass. That's why `THREAD_UPDATE_LOOKBACK_HOURS`
+defaults to 72 when `DECISION_MODEL` is set: a question answered within
+three days of being asked is then indexed with its answer. Setting it to 0
+turns that off (the app warns at startup); a longer window catches slower
+answers at the cost of re-deciding more threads each sync.
 
 ## Sync
 

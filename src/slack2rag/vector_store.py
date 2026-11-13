@@ -238,6 +238,26 @@ class VectorStore:
         self._client.upsert(collection_name=self._collection, points=points, wait=True)
         logger.debug("Upserted %d points", len(points))
 
+    def delete_message(self, channel_id: str, ts: str) -> None:
+        """Delete every point (chunks, thread summary) of one root message."""
+        self._client.delete(
+            collection_name=self._collection,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="channel_id",
+                            match=qmodels.MatchValue(value=channel_id),
+                        ),
+                        qmodels.FieldCondition(
+                            key="ts", match=qmodels.MatchValue(value=ts)
+                        ),
+                    ]
+                )
+            ),
+            wait=True,
+        )
+
     # ── read ──────────────────────────────────────────────────────────────────
 
     def search(
