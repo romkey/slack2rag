@@ -48,6 +48,8 @@ class Decision:
 def _parse_useful(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
+    if isinstance(value, int | float) and value in (0, 1):
+        return bool(value)
     if isinstance(value, str):
         text = value.strip().lower()
         if text in _YES:

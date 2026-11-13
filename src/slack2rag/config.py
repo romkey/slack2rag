@@ -83,6 +83,12 @@ DEFAULT_DECISION_PROMPT = (
 )
 
 
+# THREAD_UPDATE_LOOKBACK_HOURS when it is unset and DECISION_MODEL is set: a
+# question the decision model rejects for having no answer yet is decided
+# again once replies arrive, as long as it is this recent.
+DECISION_THREAD_LOOKBACK_HOURS = 72
+
+
 @dataclass(frozen=True)
 class Config:
     slack_bot_token: str
@@ -254,7 +260,11 @@ class Config:
             score_threshold=_float(env, "SCORE_THRESHOLD", cls.score_threshold),
             hybrid_search=_bool(env, "HYBRID_SEARCH", cls.hybrid_search),
             thread_update_lookback_hours=_int(
-                env, "THREAD_UPDATE_LOOKBACK_HOURS", cls.thread_update_lookback_hours
+                env,
+                "THREAD_UPDATE_LOOKBACK_HOURS",
+                DECISION_THREAD_LOOKBACK_HOURS
+                if env.get("DECISION_MODEL", "").strip()
+                else cls.thread_update_lookback_hours,
             ),
             reaction_boost_threshold=_int(
                 env, "REACTION_BOOST_THRESHOLD", cls.reaction_boost_threshold

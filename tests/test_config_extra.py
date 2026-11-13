@@ -351,3 +351,21 @@ def test_decision_key_warning_for_openai() -> None:
         decision_api_key="sk-x",
     )
     assert keyed.missing_api_key_warnings() == []
+
+
+@pytest.mark.parametrize(
+    ("env", "hours"),
+    [
+        ({}, 0),
+        ({"DECISION_MODEL": "m"}, 72),
+        ({"DECISION_MODEL": "m", "THREAD_UPDATE_LOOKBACK_HOURS": ""}, 72),
+        ({"DECISION_MODEL": "m", "THREAD_UPDATE_LOOKBACK_HOURS": "0"}, 0),
+        ({"DECISION_MODEL": "m", "THREAD_UPDATE_LOOKBACK_HOURS": "24"}, 24),
+        ({"DECISION_MODEL": "  ", "THREAD_UPDATE_LOOKBACK_HOURS": ""}, 0),
+    ],
+)
+def test_thread_refresh_defaults_on_with_decision_model(
+    env: dict[str, str], hours: int
+) -> None:
+    cfg = Config.from_env({"SLACK_BOT_TOKEN": "xoxb-test", **env})
+    assert cfg.thread_update_lookback_hours == hours

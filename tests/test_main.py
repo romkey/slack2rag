@@ -1013,6 +1013,21 @@ def test_main_builds_decision_model_from_llm_settings(app: SimpleNamespace) -> N
     )
 
 
+@pytest.mark.parametrize(("lookback", "warned"), [("0", True), ("", False)])
+def test_main_warns_when_decision_model_has_no_thread_refresh(
+    app: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    lookback: str,
+    warned: bool,
+) -> None:
+    app.env.setenv("RUN_ONCE", "true")
+    app.env.setenv("DECISION_MODEL", "m")
+    app.env.setenv("THREAD_UPDATE_LOOKBACK_HOURS", lookback)
+    with caplog.at_level(logging.WARNING, logger="slack2rag"):
+        assert main.main([]) == 0
+    assert ("never decided again" in caplog.text) is warned
+
+
 def test_main_decision_model_on_its_own_endpoint(app: SimpleNamespace) -> None:
     app.env.setenv("RUN_ONCE", "true")
     app.env.setenv("DECISION_MODEL", "gpt-5-nano")

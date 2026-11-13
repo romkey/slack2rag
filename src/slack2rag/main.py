@@ -598,6 +598,11 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         if cfg.thread_update_lookback_hours
         else "disabled",
     )
+    if cfg.decision_model and not cfg.thread_update_lookback_hours:
+        logger.warning(
+            "THREAD_UPDATE_LOOKBACK_HOURS is 0, so a question the decision model"
+            " rejects is never decided again after someone answers it"
+        )
     logger.info("  Run once:       %s", cfg.run_once)
     logger.info(
         "  PostgreSQL:     %s",
