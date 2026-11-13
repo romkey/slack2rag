@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+The first published release with the 0.5.0 changes below: v0.5.0 was
+tagged, but neither its image nor its GitHub Release was published.
+
+### Fixed
+
+- The release workflow no longer fails to push the image when the Actions
+  cache can't be written (as happened for v0.5.0).
+
 ## [0.5.0] - 2026-11-13
 
 The project now follows
