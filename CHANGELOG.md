@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
 The first published release with the 0.5.0 changes below: v0.5.0 was
 tagged, but neither its image nor its GitHub Release was published.
 
