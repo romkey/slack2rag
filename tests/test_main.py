@@ -18,6 +18,7 @@ import pytest
 
 from slack2rag import __version__, main
 from slack2rag.config import Config, ConfigError
+from slack2rag.decider import Decision, DecisionError, DecisionModel
 from slack2rag.embedder import EmbeddingError
 from slack2rag.pg_store import PgStore, SchemaError
 from slack2rag.processor import ChannelStats
@@ -59,6 +60,10 @@ class _ConfigOverrides(TypedDict, total=False):
     hybrid_search: bool
     thread_update_lookback_hours: int
     reaction_boost_threshold: int
+    decision_model: str
+    decision_prompt: str
+    decision_base_url: str
+    decision_api_key: str
     eval_test: bool
     eval_prompt: str
     eval_model: str
@@ -273,6 +278,98 @@ def test_sync_channel_without_sparse_or_pg(
     assert state.get_cursor("C1") == "10.0"
 
 
+def _decider(*useful: bool) -> MagicMock:
+    """A decision model answering *useful* in order, one per message."""
+    decider = MagicMock()
+    decider.decide.side_effect = [Decision(u, "why") for u in useful]
+    return decider
+
+
+def test_sync_channel_indexes_only_useful_but_persists_all(
+    tmp_path: Path, fake_build: BuildCalls, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg = _cfg(tmp_path)
+    msgs: list[JsonDict] = [
+        {"ts": "1.0", "user": "U1", "text": "the solder is in drawer 3"},
+        {"ts": "2.0", "user": "U2", "text": "lol", "reply_count": 1},
+        {"ts": "3.0", "user": "U1", "text": "anyone at the space tonight?"},
+    ]
+    replies = {"2.0": [{"ts": "2.1", "user": "U3", "text": "haha"}]}
+    slack = _slack(msgs, replies)
+    slack.get_user_name.side_effect = lambda uid: f"name-{uid}"
+    slack.resolve_text.side_effect = lambda t: t
+    msgs[1]["thread_ts"] = "2.0"
+    store = MagicMock()
+    pg = MagicMock()
+    decider = _decider(True, False, False)
+    state = SyncState(cfg.state_file)
+
+    with caplog.at_level(logging.INFO, logger="slack2rag"):
+        count, _ = main.sync_channel(
+            {"id": "C1", "name": "general"},
+            slack,
+            store,
+            _embedder(),
+            None,
+            state,
+            cfg,
+            pg=pg,
+            decider=decider,
+        )
+
+    assert count == 1
+    assert [d.text for d in store.upsert.call_args.args[0]] == ["doc-1.0"]
+    assert pg.persist_channel_messages_and_users.call_count == 3
+    assert state.get_cursor("C1") == "3.0"
+    assert "indexed 1 documents, 2 messages rejected" in caplog.text
+    text, kwargs = (
+        decider.decide.call_args_list[1].args[0],
+        decider.decide.call_args_list[1].kwargs,
+    )
+    assert text == "[name-U2]: lol\n[name-U3]: haha"
+    assert kwargs == {"channel_name": "general"}
+
+
+def test_sync_channel_does_not_ask_about_skipped_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "build_documents", lambda **kw: [])
+    cfg = _cfg(tmp_path)
+    decider = MagicMock()
+    main.sync_channel(
+        {"id": "C1"},
+        _slack([{"ts": "1.0", "text": "ok"}]),
+        MagicMock(),
+        _embedder(),
+        None,
+        SyncState(cfg.state_file),
+        cfg,
+        decider=decider,
+    )
+    decider.decide.assert_not_called()
+
+
+def test_sync_channel_decision_error_keeps_cursor(
+    tmp_path: Path, fake_build: BuildCalls
+) -> None:
+    cfg = _cfg(tmp_path)
+    state = SyncState(cfg.state_file)
+    decider = MagicMock()
+    decider.decide.side_effect = DecisionError("down")
+    with pytest.raises(DecisionError):
+        main.sync_channel(
+            {"id": "C1"},
+            _slack([{"ts": "1.0", "text": "hello there"}]),
+            MagicMock(),
+            _embedder(),
+            None,
+            state,
+            cfg,
+            decider=decider,
+        )
+    assert state.get_cursor("C1") is None
+
+
 # ── refresh_threads ──────────────────────────────────────────────────────────
 
 
@@ -324,6 +421,31 @@ def test_refresh_threads_flushes_remainder(
         main.refresh_threads({"id": "C1"}, slack, store, _embedder(), None, cfg, 1) == 1
     )
     store.upsert.assert_called_once()
+
+
+def test_refresh_threads_removes_threads_now_rejected(
+    tmp_path: Path, fake_build: BuildCalls
+) -> None:
+    cfg = _cfg(tmp_path)
+    slack = _slack(
+        [
+            {"ts": "2.0", "reply_count": 1, "thread_ts": "2.0"},
+            {"ts": "4.0", "reply_count": 1, "thread_ts": "4.0"},
+        ]
+    )
+    store = MagicMock()
+    main.refresh_threads(
+        {"id": "C1"},
+        slack,
+        store,
+        _embedder(),
+        None,
+        cfg,
+        1,
+        decider=_decider(False, True),
+    )
+    store.delete_message.assert_called_once_with("C1", "2.0")
+    assert [d.text for d in store.upsert.call_args.args[0]] == ["doc-4.0"]
 
 
 def test_refresh_threads_nothing(tmp_path: Path, fake_build: BuildCalls) -> None:
@@ -521,8 +643,9 @@ def test_run_once_full_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     slack.get_user_profiles.return_value = {"U1": {"user_id": "U1"}}
 
     def fake_sync(
-        ch: JsonDict, *args: object, pg: object = None
+        ch: JsonDict, *args: object, pg: object = None, decider: object = None
     ) -> tuple[int, ChannelStats]:
+        assert decider is the_decider
         return 3, ChannelStats(user_counts=Counter({"U9": 2}))
 
     refresh = MagicMock(return_value=0)
@@ -533,8 +656,11 @@ def test_run_once_full_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     store = MagicMock()
     store.count.return_value = 99
     pg = MagicMock()
+    the_decider = MagicMock()
 
-    main.run_once(cfg, slack, store, MagicMock(), None, MagicMock(), pg=pg)
+    main.run_once(
+        cfg, slack, store, MagicMock(), None, MagicMock(), pg=pg, decider=the_decider
+    )
 
     saved = main._load_channel_stats(str(stats_file))
     assert saved["C1"].user_counts == Counter({"U1": 1, "U9": 2})  # merged
@@ -542,6 +668,7 @@ def test_run_once_full_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert refresh.call_count == 2
     assert refresh.call_args.args[6] == 6
     assert refresh.call_args.kwargs["pg"] is pg
+    assert refresh.call_args.kwargs["decider"] is the_decider
     ch_arg, stats_arg, profiles_arg = summaries.call_args.args[:3]
     assert [c["id"] for c in ch_arg] == ["C1", "C2"]
     assert set(stats_arg) == {"C1", "C2"}
@@ -656,6 +783,34 @@ def test_check_llm_eval_failure_uses_llm_fallback(
     assert "Evaluator model FAILED" in caplog.text
 
 
+def _embedding_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    emb = MagicMock()
+    emb.embed.return_value = [[1.0]]
+    monkeypatch.setattr(main, "Embedder", MagicMock(return_value=emb))
+
+
+def test_check_llm_decision_model_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _embedding_ok(monkeypatch)
+    decide = MagicMock(return_value=Decision(True, "says where filament is"))
+    monkeypatch.setattr(DecisionModel, "decide", decide)
+    with caplog.at_level(logging.INFO, logger="slack2rag"):
+        assert main._check_llm(_cfg(tmp_path, decision_model="m")) is True
+    assert "Decision model OK (useful=True: says where filament is)" in caplog.text
+
+
+def test_check_llm_decision_model_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _embedding_ok(monkeypatch)
+    decide = MagicMock(side_effect=DecisionError("no answer"))
+    monkeypatch.setattr(DecisionModel, "decide", decide)
+    with caplog.at_level(logging.INFO, logger="slack2rag"):
+        assert main._check_llm(_cfg(tmp_path, decision_model="m")) is False
+    assert "Decision model FAILED: no answer" in caplog.text
+
+
 # ── CLI / main() ─────────────────────────────────────────────────────────────
 
 
@@ -706,6 +861,10 @@ def app(
         "EVAL_TEST",
         "EVAL_PROMPT",
         "EVAL_MODEL",
+        "DECISION_MODEL",
+        "DECISION_PROMPT",
+        "DECISION_BASE_URL",
+        "DECISION_API_KEY",
         "RUN_ONCE",
         "HYBRID_SEARCH",
         "SYNC_INTERVAL_MINUTES",
@@ -813,6 +972,7 @@ def test_main_run_once_mode(app: SimpleNamespace) -> None:
     assert args[3] is app.embedder
     assert args[4] is None
     assert kwargs["pg"] is None
+    assert kwargs["decider"] is None
     app.wait.assert_not_called()
     app.signal.assert_not_called()
 
@@ -833,6 +993,37 @@ def test_main_with_postgres_and_hybrid(app: SimpleNamespace) -> None:
     assert app.store_cls.call_args.kwargs["hybrid"] is True
     assert app.run_once.call_args.args[4] is app.sparse_cls.return_value
     assert app.run_once.call_args.kwargs["pg"] is app.pg
+
+
+def test_main_builds_decision_model_from_llm_settings(app: SimpleNamespace) -> None:
+    app.env.setenv("RUN_ONCE", "true")
+    app.env.setenv("DECISION_MODEL", "qwen3.5:9b")
+    app.env.setenv("LLM_BASE_URL", "http://llm/v1")
+    app.env.setenv("LLM_API_KEY", "k1")
+    app.env.setenv("DECISION_PROMPT", "is it useful?")
+
+    assert main.main([]) == 0
+
+    decider = app.run_once.call_args.kwargs["decider"]
+    assert (decider.base_url, decider.model, decider.prompt, decider.api_key) == (
+        "http://llm/v1",
+        "qwen3.5:9b",
+        "is it useful?",
+        "k1",
+    )
+
+
+def test_main_decision_model_on_its_own_endpoint(app: SimpleNamespace) -> None:
+    app.env.setenv("RUN_ONCE", "true")
+    app.env.setenv("DECISION_MODEL", "gpt-5-nano")
+    app.env.setenv("LLM_BASE_URL", "http://tei/v1")
+    app.env.setenv("DECISION_BASE_URL", "https://api.openai.com/v1")
+    app.env.setenv("DECISION_API_KEY", "k2")
+
+    assert main.main([]) == 0
+
+    decider = app.run_once.call_args.kwargs["decider"]
+    assert (decider.base_url, decider.api_key) == ("https://api.openai.com/v1", "k2")
 
 
 def test_main_postgres_schema_out_of_date_returns_one(
@@ -868,11 +1059,12 @@ def test_main_loop_survives_errors_and_waits(
     app.env.setenv("SYNC_INTERVAL_MINUTES", "2")
     app.run_once.side_effect = [
         EmbeddingError("embed down"),
+        DecisionError("decider down"),
         RuntimeError("qdrant down"),
         None,
     ]
     stop_event: threading.Event = app.stop_event
-    waits = iter([None, None, stop_event.set])
+    waits = iter([None, None, None, stop_event.set])
 
     def fake_wait(timeout: float | None) -> bool:
         action = next(waits)
@@ -886,9 +1078,10 @@ def test_main_loop_survives_errors_and_waits(
         assert main.main([]) == 0
 
     app.signal.assert_called_once_with(signal.SIGTERM, main._request_stop)
-    assert app.run_once.call_count == 3
-    assert [c.args[0] for c in app.wait.call_args_list] == [120, 120, 120]
+    assert app.run_once.call_count == 4
+    assert [c.args[0] for c in app.wait.call_args_list] == [120, 120, 120, 120]
     assert "Sync cycle failed (embedding error): embed down" in caplog.text
+    assert "Sync cycle failed (decision model error): decider down" in caplog.text
     assert "Sync cycle failed — will retry next interval" in caplog.text
     assert "Sleeping 2 minutes until next sync" in caplog.text
     assert "Stopped" in caplog.text

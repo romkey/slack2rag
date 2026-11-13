@@ -677,3 +677,15 @@ def test_team_summary_single_bot() -> None:
         "This Slack workspace has 0 active team members and 1 bot."
     )
     assert doc.text.split("\n")[-1] == "  bot"
+
+
+def test_format_thread_names_each_message_and_skips_empty() -> None:
+    root = {"ts": "1.0", "user": "U1", "text": " where's the <tape> "}
+    replies: list[JsonDict] = [
+        {"ts": "1.1", "user": "U2", "text": ""},
+        {"ts": "1.2", "text": "shelf B"},
+    ]
+    text = processor.format_thread(
+        root, replies, lambda t: t.replace("<tape>", "tape"), lambda u: f"@{u}"
+    )
+    assert text == "[@U1]: where's the tape\n[@unknown]: shelf B"

@@ -60,6 +60,29 @@ def _float(
     return value
 
 
+# Used when DECISION_MODEL is set and DECISION_PROMPT is not; .env.example
+# carries the same text so it is easy to copy and adapt.
+DEFAULT_DECISION_PROMPT = (
+    "You decide whether a message from a hackerspace's Slack would help a member"
+    " who later searches the chat archive for information. Answer useful if the"
+    " message (or the thread as a whole) does any of these: shares knowledge, a"
+    " technique or a tip; says where something is kept in the space; explains how"
+    " to find, get, order, borrow or check out something (tools, materials,"
+    " supplies, keys, access); explains how to use a tool, machine or piece of"
+    " software, or how something works; gives safety rules, training or sign-off"
+    " requirements, or space policies and procedures; explains how to fix,"
+    " maintain, calibrate or troubleshoot equipment; recommends a supplier, part,"
+    " project resource, link or document; answers a question with a substantive"
+    " answer; or announces a lasting change such as new equipment, an item that"
+    " moved, or a new procedure. Answer not useful for greetings, thanks, jokes,"
+    " reactions and social chit-chat; plans for a single evening or who is coming"
+    " tonight; questions nobody answered; notices that will soon be stale (the"
+    " door is open, the printer is busy right now); and anything that only makes"
+    " sense in the moment. When a thread asks a question and the replies answer"
+    " it, judge the thread as a whole."
+)
+
+
 @dataclass(frozen=True)
 class Config:
     slack_bot_token: str
@@ -101,6 +124,15 @@ class Config:
         3  # prepend "[highlighted by team]" at this many reactions
     )
 
+    # Decision model: when set, only messages it judges useful go to Qdrant
+    # (every message still goes to PostgreSQL).  Empty indexes everything.
+    decision_model: str = ""
+    decision_prompt: str = DEFAULT_DECISION_PROMPT
+    # Optional separate chat endpoint for it (the default embeddings server,
+    # TEI, has no chat models).  When empty, reuses llm_base_url / llm_api_key.
+    decision_base_url: str = ""
+    decision_api_key: str = ""
+
     eval_test: bool = False
     eval_prompt: str = ""
     eval_model: str = ""
@@ -128,6 +160,14 @@ class Config:
         return set()
 
     @property
+    def effective_decision_base_url(self) -> str:
+        return self.decision_base_url or self.llm_base_url
+
+    @property
+    def effective_decision_api_key(self) -> str:
+        return self.decision_api_key or self.llm_api_key
+
+    @property
     def effective_eval_base_url(self) -> str:
         return self.eval_base_url or self.llm_base_url
 
@@ -146,6 +186,16 @@ class Config:
             warnings.append(
                 f"LLM_BASE_URL is {self.llm_base_url} but LLM_API_KEY is not "
                 "set; OpenAI will refuse the embedding requests"
+            )
+        if (
+            self.decision_model
+            and OPENAI_HOST in self.effective_decision_base_url
+            and not self.effective_decision_api_key
+        ):
+            warnings.append(
+                f"The decision model uses {self.effective_decision_base_url} but "
+                "neither DECISION_API_KEY nor LLM_API_KEY is set; OpenAI will "
+                "refuse its requests"
             )
         if (
             self.eval_model
@@ -209,6 +259,11 @@ class Config:
             reaction_boost_threshold=_int(
                 env, "REACTION_BOOST_THRESHOLD", cls.reaction_boost_threshold
             ),
+            decision_model=env.get("DECISION_MODEL", "").strip(),
+            decision_prompt=env.get("DECISION_PROMPT", "").strip()
+            or DEFAULT_DECISION_PROMPT,
+            decision_base_url=env.get("DECISION_BASE_URL", "").strip(),
+            decision_api_key=env.get("DECISION_API_KEY", ""),
             eval_test=_bool(env, "EVAL_TEST", cls.eval_test),
             eval_prompt=env.get("EVAL_PROMPT", ""),
             eval_model=env.get("EVAL_MODEL", ""),

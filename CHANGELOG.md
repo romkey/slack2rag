@@ -57,6 +57,11 @@ before this one have no changelog entries.
 
 ### Added
 
+- Optional decision model (`DECISION_MODEL`, `DECISION_PROMPT`, and
+  `DECISION_BASE_URL` / `DECISION_API_KEY` for a separate chat server): a
+  chat-completions model decides whether each
+  message or thread is a useful resource for members; only those go to
+  Qdrant, while PostgreSQL still stores every message. `--check` tests it.
 - `LOG_LEVEL` setting.
 - A startup warning when an OpenAI endpoint has no API key.
 - Separate query and document prefixes for embedding models trained with

@@ -6,12 +6,15 @@ Flow per sync cycle
 1. List public channels (or those specified in SLACK_CHANNELS).
 2. For each channel, fetch messages newer than the last indexed timestamp.
 3. For each message, fetch thread replies (if any).
-4. Build Documents from the messages (with rich metadata).
-5. Embed in batches and upsert into Qdrant.
-6. Advance the channel cursor.
-7. Optionally refresh recently-active threads that gained new replies.
-8. Generate summary documents (channels, workspace, users, team).
-9. Sleep until the next cycle (or exit if RUN_ONCE=true).
+4. Store every message in PostgreSQL (when configured).
+5. Build Documents from the messages (with rich metadata).
+6. Ask the decision model (when configured) whether each is a useful
+   resource; drop the ones it rejects.
+7. Embed in batches and upsert into Qdrant.
+8. Advance the channel cursor.
+9. Optionally refresh recently-active threads that gained new replies.
+10. Generate summary documents (channels, workspace, users, team).
+11. Sleep until the next cycle (or exit if RUN_ONCE=true).
 """
 
 import argparse
@@ -26,6 +29,7 @@ from pathlib import Path
 from types import FrameType
 
 from .config import Config
+from .decider import DecisionError, DecisionModel
 from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
 from .evaluator import _chat_completion, run_eval
 from .pg_store import PgStore, SchemaError
@@ -39,6 +43,7 @@ from .processor import (
     build_team_summary,
     build_user_summary,
     build_workspace_summary,
+    format_thread,
 )
 from .slack_client import SlackClient
 from .state import SyncState
@@ -89,6 +94,27 @@ def _build_docs_for_message(
     )
 
 
+def _is_useful(
+    msg: SlackObject,
+    replies: list[SlackObject],
+    channel: SlackObject,
+    slack: SlackClient,
+    decider: DecisionModel,
+) -> bool:
+    """Ask the decision model whether this message or thread is worth indexing."""
+    text = format_thread(msg, replies, slack.resolve_text, slack.get_user_name)
+    channel_name = str(channel.get("name") or channel["id"])
+    decision = decider.decide(text, channel_name=channel_name)
+    logger.debug(
+        "#%s ts=%s %s: %s",
+        channel_name,
+        msg["ts"],
+        "useful" if decision.useful else "rejected",
+        decision.reason,
+    )
+    return decision.useful
+
+
 def sync_channel(
     channel: SlackObject,
     slack: SlackClient,
@@ -98,6 +124,7 @@ def sync_channel(
     state: SyncState,
     cfg: Config,
     pg: PgStore | None = None,
+    decider: DecisionModel | None = None,
 ) -> tuple[int, ChannelStats]:
     """Sync one channel.  Returns (documents_indexed, channel_stats)."""
     channel_id = channel["id"]
@@ -109,6 +136,7 @@ def sync_channel(
     pending_docs: list[Document] = []
     latest_ts: str | None = oldest_ts
     total_indexed = 0
+    rejected = 0
     stats = ChannelStats()
 
     for msg in slack.get_channel_messages(channel_id, oldest_ts=oldest_ts):
@@ -140,6 +168,9 @@ def sync_channel(
             pg.persist_channel_messages_and_users(slack, channel, msg, replies)
 
         docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
+        if docs and decider and not _is_useful(msg, replies, channel, slack, decider):
+            rejected += 1
+            docs = []
         pending_docs.extend(docs)
 
         if len(pending_docs) >= cfg.batch_size:
@@ -152,9 +183,10 @@ def sync_channel(
     if latest_ts and latest_ts != oldest_ts:
         state.set_cursor(channel_id, latest_ts)
         logger.info(
-            "#%s  indexed %d documents (cursor→%s)",
+            "#%s  indexed %d documents, %d messages rejected (cursor→%s)",
             channel_name,
             total_indexed,
+            rejected,
             latest_ts,
         )
     else:
@@ -172,6 +204,7 @@ def refresh_threads(
     cfg: Config,
     lookback_hours: int,
     pg: PgStore | None = None,
+    decider: DecisionModel | None = None,
 ) -> int:
     """Re-index threads in *channel* that received new replies recently.
 
@@ -204,6 +237,10 @@ def refresh_threads(
         if pg:
             pg.persist_channel_messages_and_users(slack, channel, msg, replies)
         docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
+        if docs and decider and not _is_useful(msg, replies, channel, slack, decider):
+            # It may have been indexed before the replies changed the verdict.
+            store.delete_message(channel_id, ts)
+            docs = []
         pending_docs.extend(docs)
         refreshed += 1
 
@@ -342,6 +379,7 @@ def run_once(
     sparse_encoder: SparseEncoder | None,
     state: SyncState,
     pg: PgStore | None = None,
+    decider: DecisionModel | None = None,
 ) -> None:
     channels = _get_channels(cfg, slack)
     if not channels:
@@ -362,6 +400,7 @@ def run_once(
             state,
             cfg,
             pg=pg,
+            decider=decider,
         )
         total += count
         cid = ch["id"]
@@ -387,6 +426,7 @@ def run_once(
                 cfg,
                 cfg.thread_update_lookback_hours,
                 pg=pg,
+                decider=decider,
             )
 
     _index_summaries(
@@ -409,8 +449,9 @@ def _check_llm(cfg: Config) -> bool:
     """Verify the configured LLM endpoint(s) are reachable.
 
     Returns True if every required check passed.  Always exercises the
-    embedding model; also exercises the evaluator model when EVAL_MODEL
-    is configured.  Logs the outcome of each check.
+    embedding model; also exercises the decision model and the evaluator
+    model when DECISION_MODEL and EVAL_MODEL are configured.  Logs the
+    outcome of each check.
     """
     all_ok = True
 
@@ -435,6 +476,32 @@ def _check_llm(cfg: Config) -> bool:
     except Exception as exc:
         logger.error("  ✗ Embedding model FAILED: %s", exc)
         all_ok = False
+
+    if cfg.decision_model:
+        logger.info("  Decision endpoint:  %s", cfg.effective_decision_base_url)
+        logger.info("  Decision model:     %s", cfg.decision_model)
+        decider = DecisionModel(
+            cfg.effective_decision_base_url,
+            cfg.decision_model,
+            cfg.decision_prompt,
+            cfg.effective_decision_api_key,
+        )
+        try:
+            decision = decider.decide(
+                "[alice]: The spare 3D printer filament is in the blue bin under"
+                " the electronics bench.",
+                channel_name="general",
+            )
+            logger.info(
+                "  ✓ Decision model OK (useful=%s: %s)",
+                decision.useful,
+                decision.reason,
+            )
+        except DecisionError as exc:
+            logger.error("  ✗ Decision model FAILED: %s", exc)
+            all_ok = False
+    else:
+        logger.info("  Decision model: skipped (DECISION_MODEL not set)")
 
     if cfg.eval_model:
         logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
@@ -474,7 +541,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Verify connectivity to the embedding and evaluator LLMs, then exit. "
+        help="Verify connectivity to the embedding, decision and evaluator LLMs, "
+        "then exit. "
         "Exit 0 on success, 1 on any failure.",
     )
     return parser.parse_args(argv)
@@ -518,6 +586,10 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         else "none",
     )
     logger.info("  Hybrid search:  %s", cfg.hybrid_search)
+    logger.info(
+        "  Decision model: %s",
+        cfg.decision_model or "none (index every message)",
+    )
     logger.info("  Channels:       %s", cfg.channel_list or "all public")
     logger.info("  Min msg length: %d chars", cfg.min_message_length)
     logger.info(
@@ -594,18 +666,41 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         hybrid=cfg.hybrid_search,
     )
     state = SyncState(cfg.state_file)
+    decider = (
+        DecisionModel(
+            cfg.effective_decision_base_url,
+            cfg.decision_model,
+            cfg.decision_prompt,
+            cfg.effective_decision_api_key,
+        )
+        if cfg.decision_model
+        else None
+    )
 
     if cfg.run_once:
-        run_once(cfg, slack, store, embedder, sparse_encoder, state, pg=pg)
+        run_once(
+            cfg, slack, store, embedder, sparse_encoder, state, pg=pg, decider=decider
+        )
         return 0
 
     signal.signal(signal.SIGTERM, _request_stop)
     interval = cfg.sync_interval_minutes * 60
     while not stop_event.is_set():
         try:
-            run_once(cfg, slack, store, embedder, sparse_encoder, state, pg=pg)
+            run_once(
+                cfg,
+                slack,
+                store,
+                embedder,
+                sparse_encoder,
+                state,
+                pg=pg,
+                decider=decider,
+            )
         except EmbeddingError as exc:
             logger.error("Sync cycle failed (embedding error): %s", exc)
+        except DecisionError as exc:
+            logger.error("Sync cycle failed (decision model error): %s", exc)
         except Exception:
             # One bad cycle (a Slack or Qdrant outage) mustn't stop the service.
             logger.exception("Sync cycle failed — will retry next interval")

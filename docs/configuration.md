@@ -58,6 +58,27 @@ dimensions, context lengths and prompts.
 | `HYBRID_SEARCH` | `false` | `true` stores sparse keyword vectors too and searches with RRF fusion. Changing it needs a fresh collection |
 | `SCORE_THRESHOLD` | `0.0` | Minimum cosine similarity for `slack2rag query` results, ≥ 0. 0 disables |
 
+## Decision model (optional)
+
+Every message still goes to PostgreSQL; only messages the decision model
+accepts go to Qdrant.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DECISION_MODEL` | *(empty: index everything)* | Chat-completions model asked, for each message or whole thread, whether it is a useful resource for members. Rejected ones aren't embedded. If the model can't be reached (after 3 tries) the sync cycle fails and retries next interval, without moving the channel cursor; an unparseable answer counts as useful |
+| `DECISION_PROMPT` | the prompt in `.env.example` | What counts as useful, on one line. The channel, the message and the JSON answer format are appended |
+| `DECISION_BASE_URL` | `LLM_BASE_URL` | A different OpenAI-compatible endpoint for the decision model. Needed with the default TEI embeddings server, which has no chat models |
+| `DECISION_API_KEY` | `LLM_API_KEY` | Its API key |
+
+Suggested models: `qwen3.5:9b` (or `qwen3.5:4b`) or Gemma 4 E4B on Ollama;
+`gpt-5-nano` or `gpt-5-mini` on OpenAI. Messages shorter than
+`MIN_MESSAGE_LENGTH` are skipped before the model is asked. Messages
+indexed before the model was set stay in Qdrant: delete the collection and
+the state file to re-index everything through it. With
+`THREAD_UPDATE_LOOKBACK_HOURS` set, refreshed threads are decided again,
+and ones now rejected are removed from Qdrant. `LOG_LEVEL=DEBUG` logs each
+verdict and its reason.
+
 ## Sync
 
 | Variable | Default | Meaning |

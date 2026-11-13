@@ -13,6 +13,7 @@
 - `src/slack2rag/processor.py`: messages → `Document`s, chunking, channel/user/team summaries.
 - `src/slack2rag/embedder.py`: `/embeddings` client with query/document prefixes and context-length fallback; `SparseEncoder`.
 - `src/slack2rag/vector_store.py`: Qdrant collection, upsert, (hybrid) search.
+- `src/slack2rag/decider.py`: decision model — which messages go to Qdrant (all go to PostgreSQL).
 - `src/slack2rag/evaluator.py`: eval mode, scoring with `/chat/completions`.
 - `src/slack2rag/pg_store.py`: optional PostgreSQL JSONB store; `migrate`, `check_schema`.
 - `src/slack2rag/migrations/`: Alembic migrations, raw SQL via `op.execute` (no ORM models).
