@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+
 slack2rag is now the Slack source of the hackerspace RAG pipeline: it
 mines Slack for facts instead of archiving it. Existing indexes are
 disposable; start the Qdrant collection and the database over.
