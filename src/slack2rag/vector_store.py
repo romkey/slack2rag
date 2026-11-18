@@ -1,53 +1,74 @@
 """
-Qdrant vector store wrapper.
+Qdrant collection for member-tier chunks (``hs_member`` by default).
 
-The collection schema stores the full message text and rich metadata as the
-point payload, so downstream applications can retrieve context without
-needing a separate data store.
+Every point has a dense vector ("dense") and a sparse keyword vector
+("sparse"); searches fuse both with reciprocal rank fusion. The embedding
+model and dimension are recorded in the collection's metadata, and a
+collection made with another model is refused: changing the model means a
+full re-embed from staging.
 
-Collection payload fields
--------------------------
-  channel_id     : str        — Slack channel ID (e.g. "C04ABCDEF")
-  channel_name   : str        — human-readable name (e.g. "general")
-  ts             : str        — Slack message timestamp
-  date           : str        — ISO-8601 date  (e.g. "2024-01-25")
-  datetime       : str        — ISO-8601 datetime (e.g. "2024-01-25T14:30:00Z")
-  user_id        : str
-  user_name      : str
-  thread_ts      : str | null
-  reply_count    : int
-  text           : str        — full clean text that was embedded
-  permalink      : str        — clickable Slack link
-  channel_topic  : str        — channel topic or purpose
-  reaction_count : int        — total emoji reactions
-  reactions      : list[str]  — reaction names
-  attachments    : list[str]  — filenames of attached files
-  doc_type       : str        — document type
-  source_system  : str        — originating system ("slack", "calibre", etc.)
+Points follow the shared payload schema (docs/overview.md lists it); this
+module only moves them. Payload indexes are created on source, tier,
+asset_ids, location_ids, topics, updated_at, section and doc_id, plus
+channel_id and kind for this source, and a full-text index on text.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import re
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .config import PUBLIC_COLLECTION
 from .embedder import SparseVector
-from .processor import Document
 
 logger = logging.getLogger(__name__)
 
-_CHANNEL_ID_RE = re.compile(r"^C[A-Z0-9]{8,}$")
+DENSE = "dense"
+SPARSE = "sparse"
 
-# A search hit: the point's payload (the fields listed in the module docstring,
-# plus whatever older indexing runs stored) with its ``score`` added.  Payload
-# values are heterogeneous JSON and qdrant_client types them as Any.
+_KEYWORD_FIELDS = (
+    "source",
+    "tier",
+    "asset_ids",
+    "location_ids",
+    "topics",
+    "section",
+    "doc_id",
+    "channel_id",
+    "kind",
+)
+
+# A search hit: the point's payload with ``score`` and ``id`` added.
 SearchHit = dict[str, Any]
+
+
+class CollectionMismatchError(RuntimeError):
+    """The collection was built with a different embedding model or size."""
+
+
+@dataclass(frozen=True)
+class Point:
+    id: str
+    dense: list[float]
+    sparse: SparseVector
+    payload: dict[str, Any]
+
+
+def _match(key: str, value: Any) -> qmodels.FieldCondition:
+    return qmodels.FieldCondition(key=key, match=qmodels.MatchValue(value=value))
+
+
+def source_filter(source: str, **equals: Any) -> qmodels.Filter:
+    return qmodels.Filter(
+        must=[_match("source", source), *(_match(k, v) for k, v in equals.items())]
+    )
 
 
 class VectorStore:
@@ -56,335 +77,221 @@ class VectorStore:
         url: str,
         collection: str,
         dimension: int,
-        *,
-        hybrid: bool = False,
+        embedding_model: str,
+        client: QdrantClient | None = None,
     ) -> None:
-        self._client = QdrantClient(url=url, timeout=30)
-        self._collection = collection
+        if collection == PUBLIC_COLLECTION:
+            raise ValueError(f"refusing to write member-tier points to {collection}")
+        self._client = client or QdrantClient(url=url, timeout=30)
+        self.collection = collection
         self._dimension = dimension
-        self._hybrid = hybrid
+        self._model = embedding_model
         self._ensure_collection()
 
-    # ── collection management ─────────────────────────────────────────────────
+    @property
+    def client(self) -> QdrantClient:
+        return self._client
+
+    # ── collection management ─────────────────────────────────────────────
 
     def _ensure_collection(self) -> None:
         existing = {c.name for c in self._client.get_collections().collections}
-        if self._collection in existing:
-            self._check_dimension()
-            self._ensure_payload_indexes()
-            logger.debug("Collection %r already exists", self._collection)
-            return
-
-        if self._hybrid:
-            self._create_hybrid_collection()
+        if self.collection in existing:
+            self._check_collection()
         else:
-            self._create_simple_collection()
-
+            logger.info(
+                "Creating Qdrant collection %r (%s, dim=%d, dense + sparse)",
+                self.collection,
+                self._model,
+                self._dimension,
+            )
+            self._client.create_collection(
+                collection_name=self.collection,
+                vectors_config={
+                    DENSE: qmodels.VectorParams(
+                        size=self._dimension, distance=qmodels.Distance.COSINE
+                    )
+                },
+                sparse_vectors_config={SPARSE: qmodels.SparseVectorParams()},
+                metadata={
+                    "embedding_model": self._model,
+                    "embedding_dimension": self._dimension,
+                    "tier": "member",
+                },
+            )
         self._ensure_payload_indexes()
 
-    def _create_simple_collection(self) -> None:
-        logger.info(
-            "Creating Qdrant collection %r (dim=%d, cosine, simple mode)",
-            self._collection,
-            self._dimension,
-        )
-        self._client.create_collection(
-            collection_name=self._collection,
-            vectors_config=qmodels.VectorParams(
-                size=self._dimension,
-                distance=qmodels.Distance.COSINE,
-            ),
-        )
-
-    def _create_hybrid_collection(self) -> None:
-        logger.info(
-            "Creating Qdrant collection %r "
-            "(dim=%d, cosine, hybrid mode with sparse vectors)",
-            self._collection,
-            self._dimension,
-        )
-        self._client.create_collection(
-            collection_name=self._collection,
-            vectors_config={
-                "dense": qmodels.VectorParams(
-                    size=self._dimension,
-                    distance=qmodels.Distance.COSINE,
-                ),
-            },
-            sparse_vectors_config={
-                "sparse": qmodels.SparseVectorParams(),
-            },
-        )
+    def _check_collection(self) -> None:
+        info = self._client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        params = vectors.get(DENSE) if isinstance(vectors, dict) else None
+        if params is None or not info.config.params.sparse_vectors:
+            raise CollectionMismatchError(
+                f"Collection {self.collection!r} has no named '{DENSE}' and"
+                f" '{SPARSE}' vectors; it was made by an older version. Delete it"
+                " and re-index from staging."
+            )
+        metadata = getattr(info.config, "metadata", None) or {}
+        model = metadata.get("embedding_model")
+        if params.size != self._dimension or (model and model != self._model):
+            raise CollectionMismatchError(
+                f"Collection {self.collection!r} holds {model or 'unknown model'}"
+                f" vectors of size {params.size}, but the embedding model is"
+                f" {self._model} (size {self._dimension}). Delete the collection"
+                " and re-embed from staging."
+            )
 
     def _ensure_payload_indexes(self) -> None:
-        """Create payload indexes if they don't already exist (idempotent)."""
-        for field_name in (
-            "channel_id",
-            "channel_name",
-            "date",
-            "user_id",
-            "doc_type",
-            "source_system",
-        ):
-            # Creating an index that already exists raises; that's the
-            # expected case on every run after the first.
-            with contextlib.suppress(Exception):
-                self._client.create_payload_index(
-                    collection_name=self._collection,
-                    field_name=field_name,
-                    field_schema=qmodels.PayloadSchemaType.KEYWORD,
-                )
-
-        # Full-text index for keyword-based search/filtering
-        with contextlib.suppress(Exception):  # already exists
-            self._client.create_payload_index(
-                collection_name=self._collection,
-                field_name="text",
-                field_schema=qmodels.TextIndexParams(
+        # Creating an index that exists is a no-op or an error, depending on
+        # the server version; either way it's the expected case after a run.
+        schemas: list[tuple[str, Any]] = [
+            (name, qmodels.PayloadSchemaType.KEYWORD) for name in _KEYWORD_FIELDS
+        ]
+        schemas += [
+            ("updated_at", qmodels.PayloadSchemaType.DATETIME),
+            ("sync_run_id", qmodels.PayloadSchemaType.INTEGER),
+            (
+                "text",
+                qmodels.TextIndexParams(
                     type=qmodels.TextIndexType.TEXT,
                     tokenizer=qmodels.TokenizerType.WORD,
                     min_token_len=2,
                     max_token_len=40,
                     lowercase=True,
                 ),
-            )
-
-        # Integer index on reaction_count for quality-weighted retrieval
-        with contextlib.suppress(Exception):  # already exists
-            self._client.create_payload_index(
-                collection_name=self._collection,
-                field_name="reaction_count",
-                field_schema=qmodels.PayloadSchemaType.INTEGER,
-            )
-
-    def _check_dimension(self) -> None:
-        """Warn if the existing collection's vector size mismatches the embedder."""
-        try:
-            info = self._client.get_collection(self._collection)
-            vec_cfg = info.config.params.vectors
-
-            if isinstance(vec_cfg, dict):
-                params = vec_cfg.get("dense", vec_cfg.get(next(iter(vec_cfg))))
-            else:
-                params = vec_cfg
-            if params is None:
-                logger.debug("Could not verify collection dimension: no vector params")
-                return
-            actual = params.size
-
-            if actual != self._dimension:
-                logger.error(
-                    "DIMENSION MISMATCH: collection %r has vectors of size %d, "
-                    "but the current embedding model produces size %d.  "
-                    "Delete the collection and re-index, or switch back to the "
-                    "original embedding model.",
-                    self._collection,
-                    actual,
-                    self._dimension,
+            ),
+        ]
+        for name, schema in schemas:
+            with contextlib.suppress(Exception):
+                self._client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=name,
+                    field_schema=schema,
                 )
-                raise RuntimeError(
-                    f"Vector dimension mismatch: collection={actual}, "
-                    f"embedder={self._dimension}"
-                )
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            logger.debug("Could not verify collection dimension: %s", exc)
 
-    # ── write ─────────────────────────────────────────────────────────────────
+    # ── write ─────────────────────────────────────────────────────────────
 
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
-    )
-    def upsert(
-        self,
-        documents: list[Document],
-        vectors: list[list[float]],
-        sparse_vectors: list[SparseVector] | None = None,
-    ) -> None:
-        """Upsert *documents* with their corresponding *vectors*.
-
-        When hybrid search is enabled, *sparse_vectors* must be provided
-        as a parallel list of dicts with ``indices`` and ``values`` keys.
-        """
-        if not documents:
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    def upsert(self, points: Sequence[Point]) -> None:
+        if not points:
             return
-
-        points: list[qmodels.PointStruct] = []
-
-        # strict=False: an over-long list is silently truncated, as before.
-        for i, (doc, vec) in enumerate(zip(documents, vectors, strict=False)):
-            if self._hybrid and sparse_vectors:
-                sv = sparse_vectors[i]
-                point = qmodels.PointStruct(
-                    id=doc.id,
+        self._client.upsert(
+            collection_name=self.collection,
+            points=[
+                qmodels.PointStruct(
+                    id=p.id,
                     vector={
-                        "dense": vec,
-                        "sparse": qmodels.SparseVector(
-                            indices=sv["indices"],
-                            values=sv["values"],
+                        DENSE: p.dense,
+                        SPARSE: qmodels.SparseVector(
+                            indices=p.sparse["indices"], values=p.sparse["values"]
                         ),
                     },
-                    payload=doc.payload(),
+                    payload=p.payload,
                 )
-            else:
-                point = qmodels.PointStruct(
-                    id=doc.id,
-                    vector=vec,
-                    payload=doc.payload(),
-                )
-            points.append(point)
-
-        self._client.upsert(collection_name=self._collection, points=points, wait=True)
-        logger.debug("Upserted %d points", len(points))
-
-    def delete_message(self, channel_id: str, ts: str) -> None:
-        """Delete every point (chunks, thread summary) of one root message."""
-        self._client.delete(
-            collection_name=self._collection,
-            points_selector=qmodels.FilterSelector(
-                filter=qmodels.Filter(
-                    must=[
-                        qmodels.FieldCondition(
-                            key="channel_id",
-                            match=qmodels.MatchValue(value=channel_id),
-                        ),
-                        qmodels.FieldCondition(
-                            key="ts", match=qmodels.MatchValue(value=ts)
-                        ),
-                    ]
-                )
-            ),
+                for p in points
+            ],
             wait=True,
         )
 
-    # ── read ──────────────────────────────────────────────────────────────────
+    def set_payload(self, ids: Sequence[str], payload: dict[str, Any]) -> None:
+        if not ids:
+            return
+        self._client.set_payload(
+            collection_name=self.collection,
+            payload=payload,
+            points=list(ids),
+            wait=True,
+        )
+
+    def delete_ids(self, ids: Sequence[str]) -> None:
+        if not ids:
+            return
+        self._client.delete(
+            collection_name=self.collection,
+            points_selector=qmodels.PointIdsList(points=list(ids)),
+            wait=True,
+        )
+
+    def delete_where(self, flt: qmodels.Filter) -> None:
+        self._client.delete(
+            collection_name=self.collection,
+            points_selector=qmodels.FilterSelector(filter=flt),
+            wait=True,
+        )
+
+    def delete_older_runs(self, source: str, run_id: int) -> None:
+        """Delete *source* points last seen by a run before *run_id*."""
+        self.delete_where(
+            qmodels.Filter(
+                must=[_match("source", source)],
+                must_not=[
+                    qmodels.FieldCondition(
+                        key="sync_run_id", range=qmodels.Range(gte=run_id)
+                    )
+                ],
+            )
+        )
+
+    # ── read ──────────────────────────────────────────────────────────────
+
+    def count(self, flt: qmodels.Filter | None = None) -> int:
+        result = self._client.count(
+            collection_name=self.collection, count_filter=flt, exact=True
+        )
+        return int(result.count)
+
+    def existing_ids(self, ids: Sequence[str]) -> set[str]:
+        if not ids:
+            return set()
+        records = self._client.retrieve(
+            collection_name=self.collection,
+            ids=list(ids),
+            with_payload=False,
+            with_vectors=False,
+        )
+        return {str(r.id) for r in records}
+
+    def similar(
+        self,
+        dense: list[float],
+        flt: qmodels.Filter | None,
+        limit: int = 5,
+    ) -> list[SearchHit]:
+        """Dense-only nearest neighbours, for duplicate and wiki matching."""
+        response = self._client.query_points(
+            collection_name=self.collection,
+            query=dense,
+            using=DENSE,
+            query_filter=flt,
+            limit=limit,
+            with_payload=True,
+        )
+        return [
+            {"id": str(p.id), "score": p.score, **(p.payload or {})}
+            for p in response.points
+        ]
 
     def search(
         self,
-        query_vector: list[float],
+        dense: list[float],
+        sparse: SparseVector,
         limit: int = 10,
-        channel_filter: str | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
+        flt: qmodels.Filter | None = None,
         score_threshold: float = 0.0,
-        sparse_vector: SparseVector | None = None,
     ) -> list[SearchHit]:
-        """
-        Semantic search.  Returns a list of payload dicts sorted by relevance.
-
-        Optional filters:
-          channel_filter  — channel name or ID
-          date_from/date_to — ISO-8601 dates (inclusive)
-          score_threshold — minimum similarity score (0.0 disables)
-
-        When *sparse_vector* is provided and the collection is in hybrid mode,
-        dense and sparse results are fused via Reciprocal Rank Fusion.
-        """
-        query_filter = self._build_filter(channel_filter, date_from, date_to)
-
-        if self._hybrid and sparse_vector:
-            return self._hybrid_search(
-                query_vector,
-                sparse_vector,
-                limit,
-                query_filter,
-                score_threshold,
-            )
-
-        return self._dense_search(query_vector, limit, query_filter, score_threshold)
-
-    def _build_filter(
-        self,
-        channel_filter: str | None,
-        date_from: str | None,
-        date_to: str | None,
-    ) -> qmodels.Filter | None:
-        conditions: list[qmodels.Condition] = []
-
-        if channel_filter:
-            key = (
-                "channel_id" if _CHANNEL_ID_RE.match(channel_filter) else "channel_name"
-            )
-            conditions.append(
-                qmodels.FieldCondition(
-                    key=key,
-                    match=qmodels.MatchValue(value=channel_filter),
-                )
-            )
-        if date_from:
-            conditions.append(
-                qmodels.FieldCondition(
-                    key="date",
-                    # Known bug, pinned by a strict xfail test: Range is numeric
-                    # and rejects an ISO date string.  Left as-is in a typing pass.
-                    range=qmodels.Range(gte=date_from),  # type: ignore[arg-type]
-                )
-            )
-        if date_to:
-            conditions.append(
-                qmodels.FieldCondition(
-                    key="date",
-                    # Same known bug as date_from above.
-                    range=qmodels.Range(lte=date_to),  # type: ignore[arg-type]
-                )
-            )
-
-        return qmodels.Filter(must=conditions) if conditions else None
-
-    def _dense_search(
-        self,
-        query_vector: list[float],
-        limit: int,
-        query_filter: qmodels.Filter | None,
-        score_threshold: float,
-    ) -> list[SearchHit]:
-        # Any: query_points takes keyword arguments of many different types.
+        """Dense + sparse retrieval fused with reciprocal rank fusion."""
+        prefetch = max(limit * 3, 20)
         kwargs: dict[str, Any] = {
-            "collection_name": self._collection,
-            "query": query_vector,
-            "limit": limit,
-            "query_filter": query_filter,
-            "with_payload": True,
-        }
-        if score_threshold > 0:
-            kwargs["score_threshold"] = score_threshold
-
-        response = self._client.query_points(**kwargs)
-
-        return [{"score": hit.score, **(hit.payload or {})} for hit in response.points]
-
-    def _hybrid_search(
-        self,
-        query_vector: list[float],
-        sparse_vector: SparseVector,
-        limit: int,
-        query_filter: qmodels.Filter | None,
-        score_threshold: float,
-    ) -> list[SearchHit]:
-        """Dense + sparse retrieval with Reciprocal Rank Fusion."""
-        prefetch_limit = max(limit * 3, 20)
-
-        sparse_qv = qmodels.SparseVector(
-            indices=sparse_vector["indices"],
-            values=sparse_vector["values"],
-        )
-
-        # Any: query_points takes keyword arguments of many different types.
-        kwargs: dict[str, Any] = {
-            "collection_name": self._collection,
+            "collection_name": self.collection,
             "prefetch": [
+                qmodels.Prefetch(query=dense, using=DENSE, limit=prefetch, filter=flt),
                 qmodels.Prefetch(
-                    query=query_vector,
-                    using="dense",
-                    limit=prefetch_limit,
-                    filter=query_filter,
-                ),
-                qmodels.Prefetch(
-                    query=sparse_qv,
-                    using="sparse",
-                    limit=prefetch_limit,
-                    filter=query_filter,
+                    query=qmodels.SparseVector(
+                        indices=sparse["indices"], values=sparse["values"]
+                    ),
+                    using=SPARSE,
+                    limit=prefetch,
+                    filter=flt,
                 ),
             ],
             "query": qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
@@ -393,46 +300,48 @@ class VectorStore:
         }
         if score_threshold > 0:
             kwargs["score_threshold"] = score_threshold
-
         response = self._client.query_points(**kwargs)
+        return [
+            {"id": str(p.id), "score": p.score, **(p.payload or {})}
+            for p in response.points
+        ]
 
-        return [{"score": hit.score, **(hit.payload or {})} for hit in response.points]
 
-    def count(self) -> int:
-        result = self._client.count(collection_name=self._collection)
-        return (
-            getattr(result, "count", None) or getattr(result, "points_count", None) or 0
+def count_in_collection(
+    client: QdrantClient, collection: str, flt: qmodels.Filter | None = None
+) -> int:
+    """Points matching *flt* in any collection; 0 if it doesn't exist."""
+    existing = {c.name for c in client.get_collections().collections}
+    if collection not in existing:
+        return 0
+    return int(
+        client.count(collection_name=collection, count_filter=flt, exact=True).count
+    )
+
+
+def text_matches_in(
+    client: QdrantClient, collection: str, needle: str, limit: int = 20
+) -> list[str]:
+    """Like VectorStore.text_matches, for any collection (read-only)."""
+    existing = {c.name for c in client.get_collections().collections}
+    if collection not in existing:
+        return []
+    # Without a full-text index Qdrant can't match text; scan payloads instead.
+    found: list[str] = []
+    offset = None
+    lowered = needle.lower()
+    while True:
+        records, offset = client.scroll(
+            collection_name=collection,
+            limit=256,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
         )
-
-    def count_by_channel(self, channel_id: str) -> int:
-        """Return the number of message points with the given channel_id.
-
-        Excludes summary documents.  Points indexed before the doc_type
-        field was added (with no doc_type at all) are counted as messages.
-        """
-        result = self._client.count(
-            collection_name=self._collection,
-            count_filter=qmodels.Filter(
-                must=[
-                    qmodels.FieldCondition(
-                        key="channel_id",
-                        match=qmodels.MatchValue(value=channel_id),
-                    ),
-                ],
-                must_not=[
-                    qmodels.FieldCondition(
-                        key="doc_type",
-                        match=qmodels.MatchAny(
-                            any=[
-                                "channel_summary",
-                                "workspace_summary",
-                                "user_summary",
-                                "team_summary",
-                                "thread_summary",
-                            ]
-                        ),
-                    ),
-                ],
-            ),
-        )
-        return getattr(result, "count", None) or 0
+        for r in records:
+            if lowered in str(r.payload or {}).lower():
+                found.append(str(r.id))
+                if len(found) >= limit:
+                    return found
+        if offset is None:
+            return found

@@ -1,539 +1,208 @@
 """
-slack2rag — entry point
+slack2rag worker: mines Slack for facts and keeps them in Qdrant.
 
-Flow per sync cycle
--------------------
-1. List public channels (or those specified in SLACK_CHANNELS).
-2. For each channel, fetch messages newer than the last indexed timestamp.
-3. For each message, fetch thread replies (if any).
-4. Store every message in PostgreSQL (when configured).
-5. Build Documents from the messages (with rich metadata).
-6. Ask the decision model (when configured) whether each is a useful
-   resource; drop the ones it rejects.
-7. Embed in batches and upsert into Qdrant.
-8. Advance the channel cursor.
-9. Optionally refresh recently-active threads that gained new replies.
-10. Generate summary documents (channels, workspace, users, team).
-11. Sleep until the next cycle (or exit if RUN_ONCE=true).
+Schedule
+--------
+* Hourly (SYNC_INTERVAL_MINUTES): catch-up of every channel the bot is in.
+* Nightly (RECONCILE_HOUR, UTC): full reconcile with the safety valve.
+* Weekly (REPORT_WEEKDAY): the wiki promotion queue, in REPORT_DIR.
+* Live (SLACK_APP_TOKEN set): Socket Mode events mark units; they are
+  processed within a minute.
+
+Each job holds a PostgreSQL advisory lock, so two workers never run at
+once, and writes its status row. One failed run is logged and retried; it
+never stops the service.
 """
 
+from __future__ import annotations
+
 import argparse
-import contextlib
-import json
+import datetime
 import logging
 import signal
 import threading
 import time
-from collections import Counter
-from pathlib import Path
+from dataclasses import dataclass
 from types import FrameType
 
 from .config import Config
-from .decider import DecisionError, DecisionModel
-from .embedder import Embedder, EmbeddingError, SparseEncoder, tokenize_text
-from .evaluator import _chat_completion, run_eval
+from .embedder import Embedder, EmbeddingError, SparseEncoder
+from .extractor import Extractor, load_topics
+from .llm import ChatModel, LLMError
 from .pg_store import PgStore, SchemaError
-from .processor import (
-    ChannelStats,
-    Document,
-    SlackObject,
-    StrTransform,
-    build_channel_summary,
-    build_documents,
-    build_team_summary,
-    build_user_summary,
-    build_workspace_summary,
-    format_thread,
-)
+from .pipeline import Pipeline
+from .realtime import LiveEvents
+from .report import write_report
 from .slack_client import SlackClient
-from .state import SyncState
-from .vector_store import VectorStore
+from .vector_store import CollectionMismatchError, VectorStore
 
 logger = logging.getLogger(__name__)
 
-# Set by SIGTERM (`docker stop`) or Ctrl-C to end the sync loop between cycles.
+# Set by SIGTERM (`docker stop`) or Ctrl-C to end the loop between runs.
 stop_event = threading.Event()
 
+LIVE_DEBOUNCE_SECONDS = 30
 
-def _build_docs_for_message(
-    msg: SlackObject,
-    replies: list[SlackObject],
-    channel: SlackObject,
-    slack: SlackClient,
-    cfg: Config,
-) -> list[Document]:
-    """Build Documents from a single message, enriched with full metadata."""
-    ts = msg["ts"]
 
-    reaction_count, reactions = slack.get_reactions(msg)
-    attachments = slack.get_attachments(msg)
-
-    # Aggregate reactions from replies too
-    for reply in replies:
-        rc, rnames = slack.get_reactions(reply)
-        reaction_count += rc
-        reactions.extend(rnames)
-        attachments.extend(slack.get_attachments(reply))
-
-    permalink = slack.make_permalink(channel["id"], ts)
-    channel_topic = slack.get_channel_topic(channel)
-
-    return build_documents(
-        root_msg=msg,
-        replies=replies,
-        channel=channel,
-        resolve_text=slack.resolve_text,
-        get_user_name=slack.get_user_name,
-        permalink=permalink,
-        channel_topic=channel_topic,
-        reaction_count=reaction_count,
-        reactions=reactions,
-        attachments=attachments,
-        min_message_length=cfg.min_message_length,
-        reaction_boost_threshold=cfg.reaction_boost_threshold,
+def make_embedder(cfg: Config) -> Embedder:
+    return Embedder(
+        base_url=cfg.llm_base_url,
+        model=cfg.embedding_model,
+        context_length=cfg.embedding_context_length,
+        api_key=cfg.llm_api_key,
+        query_prefix=cfg.embedding_query_prefix,
+        document_prefix=cfg.embedding_document_prefix,
     )
 
 
-def _is_useful(
-    msg: SlackObject,
-    replies: list[SlackObject],
-    channel: SlackObject,
-    slack: SlackClient,
-    decider: DecisionModel,
-) -> bool:
-    """Ask the decision model whether this message or thread is worth indexing."""
-    text = format_thread(msg, replies, slack.resolve_text, slack.get_user_name)
-    channel_name = str(channel.get("name") or channel["id"])
-    decision = decider.decide(text, channel_name=channel_name)
-    logger.debug(
-        "#%s ts=%s %s: %s",
-        channel_name,
-        msg["ts"],
-        "useful" if decision.useful else "rejected",
-        decision.reason,
-    )
-    return decision.useful
-
-
-def sync_channel(
-    channel: SlackObject,
-    slack: SlackClient,
-    store: VectorStore,
-    embedder: Embedder,
-    sparse_encoder: SparseEncoder | None,
-    state: SyncState,
-    cfg: Config,
-    pg: PgStore | None = None,
-    decider: DecisionModel | None = None,
-) -> tuple[int, ChannelStats]:
-    """Sync one channel.  Returns (documents_indexed, channel_stats)."""
-    channel_id = channel["id"]
-    channel_name = channel.get("name", channel_id)
-    oldest_ts = state.get_cursor(channel_id)
-
-    logger.info("Syncing #%s  (oldest_ts=%s)", channel_name, oldest_ts or "beginning")
-
-    pending_docs: list[Document] = []
-    latest_ts: str | None = oldest_ts
-    total_indexed = 0
-    rejected = 0
-    stats = ChannelStats()
-
-    for msg in slack.get_channel_messages(channel_id, oldest_ts=oldest_ts):
-        ts = msg["ts"]
-
-        if latest_ts is None or float(ts) > float(latest_ts):
-            latest_ts = ts
-
-        replies: list[SlackObject] = []
-        if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == ts:
-            replies = slack.get_thread_replies(channel_id, ts)
-
-        # Accumulate channel statistics
-        raw_text = msg.get("text", "")
-        stats.token_counts.update(Counter(tokenize_text(raw_text)))
-        uid = msg.get("user", "unknown")
-        if uid != "unknown":
-            stats.user_counts[uid] += 1
-        with contextlib.suppress(ValueError, TypeError):
-            stats.timestamps.append(float(ts))
-        for reply in replies:
-            reply_text = reply.get("text", "")
-            stats.token_counts.update(Counter(tokenize_text(reply_text)))
-            ruid = reply.get("user", "unknown")
-            if ruid != "unknown":
-                stats.user_counts[ruid] += 1
-
-        if pg:
-            pg.persist_channel_messages_and_users(slack, channel, msg, replies)
-
-        docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
-        if docs and decider and not _is_useful(msg, replies, channel, slack, decider):
-            rejected += 1
-            docs = []
-        pending_docs.extend(docs)
-
-        if len(pending_docs) >= cfg.batch_size:
-            total_indexed += _flush(pending_docs, store, embedder, sparse_encoder)
-            pending_docs = []
-
-    if pending_docs:
-        total_indexed += _flush(pending_docs, store, embedder, sparse_encoder)
-
-    if latest_ts and latest_ts != oldest_ts:
-        state.set_cursor(channel_id, latest_ts)
-        logger.info(
-            "#%s  indexed %d documents, %d messages rejected (cursor→%s)",
-            channel_name,
-            total_indexed,
-            rejected,
-            latest_ts,
-        )
-    else:
-        logger.info("#%s  no new messages", channel_name)
-
-    return total_indexed, stats
-
-
-def refresh_threads(
-    channel: SlackObject,
-    slack: SlackClient,
-    store: VectorStore,
-    embedder: Embedder,
-    sparse_encoder: SparseEncoder | None,
-    cfg: Config,
-    lookback_hours: int,
-    pg: PgStore | None = None,
-    decider: DecisionModel | None = None,
-) -> int:
-    """Re-index threads in *channel* that received new replies recently.
-
-    Looks back *lookback_hours* from now, finds threaded messages, and
-    re-indexes them.  Upsert is idempotent so unchanged threads are
-    harmless (same UUID → overwrite with identical data).
-    """
-    channel_id = channel["id"]
-    channel_name = channel.get("name", channel_id)
-
-    lookback_ts = str(time.time() - lookback_hours * 3600)
-
-    logger.info(
-        "#%s  refreshing threads active in the last %d hours",
-        channel_name,
-        lookback_hours,
+def make_chat(cfg: Config) -> ChatModel:
+    return ChatModel(
+        cfg.effective_chat_base_url, cfg.chat_model, cfg.effective_chat_api_key
     )
 
-    pending_docs: list[Document] = []
-    refreshed = 0
 
-    for msg in slack.get_channel_messages(channel_id, oldest_ts=lookback_ts):
-        if msg.get("reply_count", 0) == 0:
-            continue
-        ts = msg["ts"]
-        if msg.get("thread_ts") != ts:
-            continue
-
-        replies = slack.get_thread_replies(channel_id, ts)
-        if pg:
-            pg.persist_channel_messages_and_users(slack, channel, msg, replies)
-        docs = _build_docs_for_message(msg, replies, channel, slack, cfg)
-        if docs and decider and not _is_useful(msg, replies, channel, slack, decider):
-            # It may have been indexed before the replies changed the verdict.
-            store.delete_message(channel_id, ts)
-            docs = []
-        pending_docs.extend(docs)
-        refreshed += 1
-
-        if len(pending_docs) >= cfg.batch_size:
-            _flush(pending_docs, store, embedder, sparse_encoder)
-            pending_docs = []
-
-    if pending_docs:
-        _flush(pending_docs, store, embedder, sparse_encoder)
-
-    logger.info("#%s  refreshed %d threads", channel_name, refreshed)
-    return refreshed
+def build_pipeline(cfg: Config, store: PgStore | None = None) -> Pipeline:
+    """Connect everything. Raises on a missing service or bad schema."""
+    store = store or PgStore(cfg.database_url)
+    store.check_schema()
+    slack = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause)
+    slack.identify()
+    embedder = make_embedder(cfg)
+    vectors = VectorStore(
+        cfg.qdrant_url, cfg.qdrant_collection, embedder.dimension, cfg.embedding_model
+    )
+    extractor = Extractor(
+        make_chat(cfg), load_topics(cfg.topics_file), slack.member_names()
+    )
+    return Pipeline(cfg, slack, store, vectors, embedder, extractor, SparseEncoder())
 
 
-def _flush(
-    docs: list[Document],
-    store: VectorStore,
-    embedder: Embedder,
-    sparse_encoder: SparseEncoder | None,
-) -> int:
-    texts = [d.text for d in docs]
-    vectors = embedder.embed(texts, kind="document")
-    sparse_vectors = sparse_encoder.encode(texts) if sparse_encoder else None
-    store.upsert(docs, vectors, sparse_vectors=sparse_vectors)
-    return len(docs)
-
-
-def _load_channel_stats(stats_file: str | Path) -> dict[str, ChannelStats]:
-    """Load persistent channel stats from disk."""
-    path = Path(stats_file)
-    if not path.exists():
-        return {}
+def _check(cfg: Config) -> bool:
+    """Probe the embedding model, the chat model and Slack; log each result."""
+    ok = True
     try:
-        with path.open() as f:
-            raw = json.load(f)
-        return {k: ChannelStats.from_dict(v) for k, v in raw.items()}
-    except json.JSONDecodeError, OSError, KeyError:
-        return {}
-
-
-def _save_channel_stats(
-    stats_file: str | Path, all_stats: dict[str, ChannelStats]
-) -> None:
-    """Persist accumulated channel stats to disk."""
-    path = Path(stats_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    raw = {k: v.to_dict() for k, v in all_stats.items()}
-    try:
-        with path.open("w") as f:
-            json.dump(raw, f)
-    except OSError as exc:
-        logger.warning("Could not save channel stats: %s", exc)
-
-
-def _index_summaries(
-    channels: list[SlackObject],
-    channel_stats: dict[str, ChannelStats],
-    user_profiles: dict[str, SlackObject],
-    get_user_name: StrTransform,
-    store: VectorStore,
-    embedder: Embedder,
-    sparse_encoder: SparseEncoder | None,
-) -> None:
-    """Generate and index workspace, channel, user, and team summary documents."""
-    logger.info("Generating channel, workspace, and user summaries…")
-
-    channel_counts: dict[str, int] = {}
-    summary_docs: list[Document] = []
-
-    for ch in channels:
-        cid = ch["id"]
-        count = store.count_by_channel(cid)
-        channel_counts[cid] = count
-        summary_docs.append(
-            build_channel_summary(
-                ch,
-                count,
-                stats=channel_stats.get(cid),
-                get_user_name=get_user_name,
-            )
-        )
-
-    summary_docs.append(build_workspace_summary(channels, channel_counts))
-
-    # Build user→channel activity map from accumulated stats
-    user_channels: dict[str, Counter[str]] = {}
-    channel_names: dict[str, str] = {}
-    for ch in channels:
-        ch_id: str = ch["id"]
-        channel_names[ch_id] = ch.get("name", ch_id)
-    for cid, cstats in channel_stats.items():
-        cname = channel_names.get(cid, cid)
-        for uid, msg_count in cstats.user_counts.items():
-            if uid not in user_channels:
-                user_channels[uid] = Counter()
-            user_channels[uid][cname] += msg_count
-
-    profiles = list(user_profiles.values())
-    for p in profiles:
-        if not p.get("deleted"):
-            uid = p["user_id"]
-            active = [ch for ch, _ in user_channels.get(uid, Counter()).most_common(10)]
-            summary_docs.append(build_user_summary(p, active_channels=active or None))
-    summary_docs.append(build_team_summary(profiles))
-
-    _flush(summary_docs, store, embedder, sparse_encoder)
-    logger.info("Indexed %d summary documents", len(summary_docs))
-
-
-def _get_channels(cfg: Config, slack: SlackClient) -> list[SlackObject]:
-    """Fetch channels, applying both the include list and the blacklist."""
-    channels = slack.get_public_channels(cfg.channel_list or None)
-    blacklist = cfg.channel_blacklist
-    if blacklist and channels:
-        before = len(channels)
-        channels = [
-            ch
-            for ch in channels
-            if ch.get("name", "") not in blacklist and ch["id"] not in blacklist
-        ]
-        skipped = before - len(channels)
-        if skipped:
-            logger.info(
-                "Blacklist: skipping %d channel(s): %s",
-                skipped,
-                ", ".join(sorted(blacklist)),
-            )
-    return channels
-
-
-def run_once(
-    cfg: Config,
-    slack: SlackClient,
-    store: VectorStore,
-    embedder: Embedder,
-    sparse_encoder: SparseEncoder | None,
-    state: SyncState,
-    pg: PgStore | None = None,
-    decider: DecisionModel | None = None,
-) -> None:
-    channels = _get_channels(cfg, slack)
-    if not channels:
-        logger.warning("No accessible public channels found")
-        return
-
-    stats_file = Path(cfg.state_file).parent / "channel_stats.json"
-    all_stats = _load_channel_stats(stats_file)
-
-    total = 0
-    for ch in channels:
-        count, new_stats = sync_channel(
-            ch,
-            slack,
-            store,
-            embedder,
-            sparse_encoder,
-            state,
-            cfg,
-            pg=pg,
-            decider=decider,
-        )
-        total += count
-        cid = ch["id"]
-        if cid in all_stats:
-            all_stats[cid].merge(new_stats)
-        else:
-            all_stats[cid] = new_stats
-
-    _save_channel_stats(stats_file, all_stats)
-
-    if cfg.thread_update_lookback_hours > 0:
+        vector = make_embedder(cfg).embed(["slack2rag check"], kind="query")[0]
         logger.info(
-            "Starting thread-update refresh pass (%dh lookback)…",
-            cfg.thread_update_lookback_hours,
+            "  ✓ Embedding model %s (dimension %d)", cfg.embedding_model, len(vector)
         )
-        for ch in channels:
-            refresh_threads(
-                ch,
-                slack,
-                store,
-                embedder,
-                sparse_encoder,
-                cfg,
-                cfg.thread_update_lookback_hours,
-                pg=pg,
-                decider=decider,
-            )
-
-    _index_summaries(
-        channels,
-        all_stats,
-        slack.get_user_profiles(),
-        slack.get_user_name,
-        store,
-        embedder,
-        sparse_encoder,
-    )
-    logger.info(
-        "Sync complete — %d documents indexed  (total in store: %d)",
-        total,
-        store.count(),
-    )
-
-
-def _check_llm(cfg: Config) -> bool:
-    """Verify the configured LLM endpoint(s) are reachable.
-
-    Returns True if every required check passed.  Always exercises the
-    embedding model; also exercises the decision model and the evaluator
-    model when DECISION_MODEL and EVAL_MODEL are configured.  Logs the
-    outcome of each check.
-    """
-    all_ok = True
-
-    logger.info("LLM connectivity check")
-    logger.info("  Embedding endpoint: %s", cfg.llm_base_url)
-    logger.info("  Embedding model:    %s", cfg.embedding_model)
+    except EmbeddingError as exc:
+        logger.error("  ✗ Embedding model: %s", exc)
+        ok = False
     try:
-        embedder = Embedder(
-            base_url=cfg.llm_base_url,
-            model=cfg.embedding_model,
-            context_length=cfg.embedding_context_length,
-            api_key=cfg.llm_api_key,
-            query_prefix=cfg.embedding_query_prefix,
-            document_prefix=cfg.embedding_document_prefix,
+        answer = make_chat(cfg).chat_json(
+            'Reply with JSON only: {"ok": true}.', "This is a connectivity check."
         )
-        vector = embedder.embed(["slack2rag connectivity check"], kind="query")[0]
-        logger.info(
-            "  ✓ Embedding model OK (dimension=%d, sample[0]=%.4f)",
-            len(vector),
-            vector[0] if vector else 0.0,
-        )
+        logger.info("  ✓ Chat model %s (%s)", cfg.chat_model, answer)
+    except LLMError as exc:
+        logger.error("  ✗ Chat model: %s", exc)
+        ok = False
+    try:
+        me = SlackClient(cfg.slack_bot_token, api_pause=0).identify()
+        logger.info("  ✓ Slack (%s, bot user %s)", me.workspace_url, me.user_id)
     except Exception as exc:
-        logger.error("  ✗ Embedding model FAILED: %s", exc)
-        all_ok = False
+        logger.error("  ✗ Slack: %s", exc)
+        ok = False
+    return ok
 
-    if cfg.decision_model:
-        logger.info("  Decision endpoint:  %s", cfg.effective_decision_base_url)
-        logger.info("  Decision model:     %s", cfg.decision_model)
-        decider = DecisionModel(
-            cfg.effective_decision_base_url,
-            cfg.decision_model,
-            cfg.decision_prompt,
-            cfg.effective_decision_api_key,
+
+@dataclass
+class Schedule:
+    """When each job last ran, and whether it is due."""
+
+    cfg: Config
+    last_catchup: float = 0.0
+    last_reconcile: datetime.date | None = None
+    last_report: datetime.date | None = None
+
+    def catchup_due(self, now: float) -> bool:
+        return now - self.last_catchup >= self.cfg.sync_interval_minutes * 60
+
+    def reconcile_due(self, now: datetime.datetime) -> bool:
+        return now.hour == self.cfg.reconcile_hour and self.last_reconcile != now.date()
+
+    def report_due(self, now: datetime.datetime) -> bool:
+        return (
+            now.weekday() == self.cfg.report_weekday
+            and now.hour >= self.cfg.reconcile_hour
+            and self.last_report != now.date()
         )
+
+
+def run_job(pipeline: Pipeline, job: str) -> bool:
+    """Run one job under the source lock; False if it failed or was skipped."""
+    with pipeline.store.lock() as got:
+        if not got:
+            logger.warning("Another slack2rag worker holds the lock; skipping %s", job)
+            return False
         try:
-            decision = decider.decide(
-                "[alice]: The spare 3D printer filament is in the blue bin under"
-                " the electronics bench.",
-                channel_name="general",
-            )
-            logger.info(
-                "  ✓ Decision model OK (useful=%s: %s)",
-                decision.useful,
-                decision.reason,
-            )
-        except DecisionError as exc:
-            logger.error("  ✗ Decision model FAILED: %s", exc)
-            all_ok = False
-    else:
-        logger.info("  Decision model: skipped (DECISION_MODEL not set)")
+            if job == "catchup":
+                pipeline.catchup()
+            elif job == "reconcile":
+                pipeline.extractor.member_names = frozenset(
+                    pipeline.slack.member_names()
+                )
+                pipeline.reconcile()
+            elif job == "live":
+                pipeline.process_dirty()
+            elif job == "report":
+                write_report(
+                    pipeline.store,
+                    pipeline.vectors,
+                    pipeline.cfg.report_dir,
+                    datetime.datetime.now(tz=datetime.UTC).date(),
+                )
+        except Exception:
+            # One bad run (a Slack or model outage) mustn't stop the service.
+            logger.exception("The %s run failed; it will be retried", job)
+            return False
+    return True
 
-    if cfg.eval_model:
-        logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
-        logger.info("  Evaluator model:    %s", cfg.eval_model)
-        probe_prompt = (
-            'Reply with JSON only: {"ok": true}.  This is a connectivity check.'
-        )
-        content = _chat_completion(
-            cfg.effective_eval_base_url,
-            cfg.effective_eval_api_key,
-            cfg.eval_model,
-            probe_prompt,
-            timeout=30,
-        )
-        if content is None:
-            logger.error("  ✗ Evaluator model FAILED (see error above)")
-            all_ok = False
+
+def _request_stop(signum: int, frame: FrameType | None) -> None:
+    logger.info("Received signal %d; stopping after the current run", signum)
+    stop_event.set()
+
+
+def loop(pipeline: Pipeline, live: LiveEvents | None) -> None:
+    cfg = pipeline.cfg
+    schedule = Schedule(cfg)
+    if pipeline.store.last_run("reconcile") is None:
+        logger.info("No full reconcile has run yet; starting with one")
+        if run_job(pipeline, "reconcile"):
+            schedule.last_reconcile = datetime.datetime.now(tz=datetime.UTC).date()
+            schedule.last_catchup = time.time()
+    while not stop_event.is_set():
+        now = time.time()
+        today = datetime.datetime.now(tz=datetime.UTC)
+        if live is not None:
+            for channel in live.take_forgotten():
+                with pipeline.store.lock() as got:
+                    if got:
+                        pipeline.forget_channel(channel)
+            if live.wake.is_set():
+                live.wake.clear()
+                stop_event.wait(LIVE_DEBOUNCE_SECONDS)
+                run_job(pipeline, "live")
+        if schedule.reconcile_due(today):
+            if run_job(pipeline, "reconcile"):
+                schedule.last_reconcile = today.date()
+                schedule.last_catchup = now
+        elif schedule.catchup_due(now):
+            run_job(pipeline, "catchup")
+            schedule.last_catchup = now
+        if schedule.report_due(today) and run_job(pipeline, "report"):
+            schedule.last_report = today.date()
+        if live is not None:
+            live.wake.wait(timeout=60)
         else:
-            preview = content.strip().replace("\n", " ")[:120]
-            logger.info("  ✓ Evaluator model OK (response: %s)", preview)
-    else:
-        logger.info("  Evaluator: skipped (EVAL_MODEL not set)")
-
-    return all_ok
+            stop_event.wait(60)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from . import __version__
 
     parser = argparse.ArgumentParser(
-        prog="slack2rag",
-        description="Index Slack messages into Qdrant for RAG.",
+        prog="slack2rag", description="Mine Slack for facts and index them in Qdrant."
     )
     parser.add_argument(
         "-V", "--version", action="version", version=f"%(prog)s {__version__}"
@@ -541,20 +210,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Verify connectivity to the embedding, decision and evaluator LLMs, "
-        "then exit. "
-        "Exit 0 on success, 1 on any failure.",
+        help="Check the embedding model, chat model and Slack token, then exit "
+        "(0 if all work, 1 if not).",
     )
     return parser.parse_args(argv)
 
 
-def _request_stop(signum: int, frame: FrameType | None) -> None:
-    logger.info("Received signal %d; stopping after the current sync cycle", signum)
-    stop_event.set()
-
-
 def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
-    """Run the indexer; returns the process exit code."""
+    """Run the worker; returns the process exit code."""
     args = _parse_args(argv)
     if cfg is None:
         cfg = Config.from_env()
@@ -566,152 +229,46 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
         logger.warning("%s", warning)
 
     if args.check:
-        if _check_llm(cfg):
-            logger.info("LLM check: SUCCESS")
+        if _check(cfg):
+            logger.info("Check: SUCCESS")
             return 0
-        logger.error("LLM check: FAILURE")
+        logger.error("Check: FAILURE")
         return 1
 
-    logger.info("  Qdrant:         %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
-    logger.info("  LLM:            %s", cfg.llm_base_url)
-    logger.info("  Embedding model: %s", cfg.embedding_model)
+    logger.info("  Qdrant:        %s / %s", cfg.qdrant_url, cfg.qdrant_collection)
+    logger.info("  Gateway:       %s", cfg.llm_base_url)
+    logger.info("  Embeddings:    %s", cfg.embedding_model)
     logger.info(
-        "  Query prefix:   %s",
-        repr(cfg.embedding_query_prefix) if cfg.embedding_query_prefix else "none",
+        "  Chat model:    %s at %s", cfg.chat_model, cfg.effective_chat_base_url
     )
+    logger.info("  Live events:   %s", "on" if cfg.slack_app_token else "off")
     logger.info(
-        "  Doc prefix:     %s",
-        repr(cfg.embedding_document_prefix)
-        if cfg.embedding_document_prefix
-        else "none",
+        "  Denylist:      %s", ", ".join(sorted(cfg.slack_channel_denylist)) or "none"
     )
-    logger.info("  Hybrid search:  %s", cfg.hybrid_search)
-    logger.info(
-        "  Decision model: %s",
-        cfg.decision_model or "none (index every message)",
-    )
-    logger.info("  Channels:       %s", cfg.channel_list or "all public")
-    logger.info("  Min msg length: %d chars", cfg.min_message_length)
-    logger.info(
-        "  Thread refresh: %s",
-        f"{cfg.thread_update_lookback_hours}h lookback"
-        if cfg.thread_update_lookback_hours
-        else "disabled",
-    )
-    if cfg.decision_model and not cfg.thread_update_lookback_hours:
-        logger.warning(
-            "THREAD_UPDATE_LOOKBACK_HOURS is 0, so a question the decision model"
-            " rejects is never decided again after someone answers it"
-        )
-    logger.info("  Run once:       %s", cfg.run_once)
-    logger.info(
-        "  PostgreSQL:     %s",
-        "enabled" if cfg.database_url else "disabled",
-    )
-
-    slack = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause)
-    slack.prefetch_users()
-    slack.fetch_workspace_url()
-
-    pg = PgStore.from_url(cfg.database_url)
-    if pg:
-        try:
-            pg.check_schema()
-        except SchemaError as exc:
-            logger.error("%s", exc)
-            return 1
-        pg.bulk_upsert_users(slack.user_records())
-
-    if cfg.eval_test:
-        if not cfg.eval_prompt:
-            logger.error(
-                "EVAL_TEST is set but EVAL_PROMPT is empty"
-                " — nothing to evaluate against"
-            )
-            return 1
-        if not cfg.eval_model:
-            logger.error(
-                "EVAL_TEST is set but EVAL_MODEL is empty — no LLM model specified"
-            )
-            return 1
-        logger.info("*** EVAL MODE — scoring messages, skipping normal indexing ***")
-        logger.info("  Evaluator endpoint: %s", cfg.effective_eval_base_url)
-        logger.info("  Evaluator model:    %s", cfg.eval_model)
-        channels = _get_channels(cfg, slack)
-        run_eval(
-            cfg.effective_eval_base_url,
-            cfg.eval_model,
-            cfg.eval_prompt,
-            channels,
-            slack,
-            api_key=cfg.effective_eval_api_key,
-            pg=pg,
-        )
-        return 0
 
     try:
-        embedder = Embedder(
-            base_url=cfg.llm_base_url,
-            model=cfg.embedding_model,
-            context_length=cfg.embedding_context_length,
-            api_key=cfg.llm_api_key,
-            query_prefix=cfg.embedding_query_prefix,
-            document_prefix=cfg.embedding_document_prefix,
-        )
-    except EmbeddingError as exc:
-        logger.error("Embedding setup failed:\n  %s", exc)
+        pipeline = build_pipeline(cfg)
+    except SchemaError as exc:
+        logger.error("%s", exc)
+        return 1
+    except (EmbeddingError, CollectionMismatchError) as exc:
+        logger.error("%s", exc)
         return 1
 
-    sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
-
-    store = VectorStore(
-        url=cfg.qdrant_url,
-        collection=cfg.qdrant_collection,
-        dimension=embedder.dimension,
-        hybrid=cfg.hybrid_search,
-    )
-    state = SyncState(cfg.state_file)
-    decider = (
-        DecisionModel(
-            cfg.effective_decision_base_url,
-            cfg.decision_model,
-            cfg.decision_prompt,
-            cfg.effective_decision_api_key,
-        )
-        if cfg.decision_model
-        else None
-    )
-
     if cfg.run_once:
-        run_once(
-            cfg, slack, store, embedder, sparse_encoder, state, pg=pg, decider=decider
-        )
-        return 0
+        ok = run_job(pipeline, "catchup")
+        return 0 if ok else 1
+
+    live = None
+    if cfg.slack_app_token:
+        live = LiveEvents(pipeline.store, pipeline.me, cfg.slack_channel_denylist)
+        live.start(cfg.slack_app_token, pipeline.slack.web_client)
 
     signal.signal(signal.SIGTERM, _request_stop)
-    interval = cfg.sync_interval_minutes * 60
-    while not stop_event.is_set():
-        try:
-            run_once(
-                cfg,
-                slack,
-                store,
-                embedder,
-                sparse_encoder,
-                state,
-                pg=pg,
-                decider=decider,
-            )
-        except EmbeddingError as exc:
-            logger.error("Sync cycle failed (embedding error): %s", exc)
-        except DecisionError as exc:
-            logger.error("Sync cycle failed (decision model error): %s", exc)
-        except Exception:
-            # One bad cycle (a Slack or Qdrant outage) mustn't stop the service.
-            logger.exception("Sync cycle failed — will retry next interval")
-        if stop_event.is_set():
-            break
-        logger.info("Sleeping %d minutes until next sync…", cfg.sync_interval_minutes)
-        stop_event.wait(interval)
+    try:
+        loop(pipeline, live)
+    finally:
+        if live is not None:
+            live.stop()
     logger.info("Stopped")
     return 0

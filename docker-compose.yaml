@@ -2,9 +2,9 @@
 # dependencies installed, plus Qdrant, PostgreSQL and a local embedding
 # server (see docker-compose.prod.yaml for using another provider).
 #
-#   cp .env.example .env              # then set SLACK_BOT_TOKEN
+#   cp .env.example .env              # then set SLACK_BOT_TOKEN and CHAT_MODEL
 #   docker compose up --build
-#   docker compose run --rm app slack2rag query "deploy process"
+#   docker compose run --rm app slack2rag query "where is the laser key"
 #   docker compose run --rm app bash  # a shell with everything installed
 #
 # Restart the app (docker compose restart app) to pick up code changes.
@@ -29,7 +29,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-http://embeddings/v1}  # see docker-compose.prod.yaml
       DATABASE_URL: postgresql://slack2rag:slack2rag@db:5432/slack2rag  # not-a-secret
-      STATE_FILE: /data/state.json
+      REPORT_DIR: /data/reports
     depends_on:
       qdrant:
         condition: service_healthy
