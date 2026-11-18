@@ -15,8 +15,9 @@ open a pull request; CI and Lint must pass before it can merge.
 
 - The app doesn't listen on a port, so there is no `/healthz` and
   `docker-compose.prod.yaml` has no health check for `app`.
-- PostgreSQL is optional (`DATABASE_URL` empty disables it), so the
-  production `db` and `migrate` services are behind the `postgres`
-  compose profile.
+- PostgreSQL is required (the staging store), and the production `db`
+  and `migrate` services always run.
 - Database tests read `TEST_DATABASE_URL`, not `DATABASE_URL`, so a real
   `DATABASE_URL` in the environment is never touched by tests.
+- The Slack source never stores raw message text, user IDs or names
+  (docs/overview.md); keep it that way.

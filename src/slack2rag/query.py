@@ -1,127 +1,93 @@
 """
-slack2rag query CLI
+slack2rag query: hybrid search over the Slack facts in the collection.
 
-Usage (inside Docker):
-  docker compose -f docker-compose.prod.yaml run --rm app \\
-      slack2rag query "how do I set up SSO?"
-
-Usage (local, against a running Qdrant):
-  QDRANT_URL=http://localhost:6333 \\
-      slack2rag query --limit 10 --channel engineering "deploy process"
+  slack2rag query "where is the laser cutter manual?"
+  slack2rag query --kind howto --channel laser "focus the lens"
 """
 
 import argparse
 import sys
 import textwrap
 
+from qdrant_client.http import models as qmodels
+
 from .config import Config
 from .embedder import Embedder, EmbeddingError, SparseEncoder
+from .pg_store import SOURCE
 from .vector_store import SearchHit, VectorStore
 
-_SCORE_BAR_WIDTH = 20
 
-
-def _score_bar(score: float) -> str:
-    clamped = max(0.0, min(1.0, score))
-    filled = round(clamped * _SCORE_BAR_WIDTH)
-    return "█" * filled + "░" * (_SCORE_BAR_WIDTH - filled)
-
-
-def _print_result(idx: int, hit: SearchHit, show_score: bool) -> None:
-    score = hit.get("score", 0.0)
-    channel = hit.get("channel_name", hit.get("channel_id", "?"))
-    date = hit.get("date", "")
-    dt = hit.get("datetime", "")
-    user = hit.get("user_name", hit.get("user_id", "?"))
-    text = hit.get("text", "")
-    reply_count = hit.get("reply_count", 0)
-    reaction_count = hit.get("reaction_count", 0)
-    permalink = hit.get("permalink", "")
-    channel_topic = hit.get("channel_topic", "")
-    attachments = hit.get("attachments", [])
-
-    thread_note = ""
-    if reply_count:
-        thread_note = f"  [{reply_count} repl{'y' if reply_count == 1 else 'ies'}]"
-
-    reaction_note = ""
-    if reaction_count:
-        reaction_note = (
-            f"  {reaction_count} reaction{'s' if reaction_count != 1 else ''}"
+def _filter(channel: str | None, kind: str | None, current: bool) -> qmodels.Filter:
+    must: list[qmodels.Condition] = [
+        qmodels.FieldCondition(key="source", match=qmodels.MatchValue(value=SOURCE))
+    ]
+    if channel:
+        key = (
+            "channel_id"
+            if channel.startswith("C") and channel.isupper()
+            else ("channel_name")
         )
-
-    display_date = dt if dt else date
-    header = (
-        f"#{idx + 1}  #{channel}  {display_date}  @{user}{thread_note}{reaction_note}"
+        must.append(
+            qmodels.FieldCondition(
+                key=key, match=qmodels.MatchValue(value=channel.lstrip("#"))
+            )
+        )
+    if kind:
+        must.append(
+            qmodels.FieldCondition(key="kind", match=qmodels.MatchValue(value=kind))
+        )
+    if not current:
+        return qmodels.Filter(must=must)
+    # Current facts have superseded_by null (or, from other sources, unset).
+    superseded = qmodels.PayloadField(key="superseded_by")
+    return qmodels.Filter(
+        must=must,
+        should=[
+            qmodels.IsNullCondition(is_null=superseded),
+            qmodels.IsEmptyCondition(is_empty=superseded),
+        ],
     )
-    if show_score:
-        header += f"  {_score_bar(score)}  {score:.3f}"
 
+
+def _print_hit(index: int, hit: SearchHit) -> None:
+    label = hit.get("label") or hit.get("source", "")
+    kind = hit.get("kind", "")
+    header = f"#{index + 1}  [{kind}] {label}  #{hit.get('channel_name', '')}"
+    header += f"  score {hit.get('score', 0.0):.3f}"
+    if hit.get("superseded_by"):
+        header += "  (superseded)"
+    if hit.get("confidence"):
+        header += f"  confidence {hit['confidence']}"
     print(header)
-    if channel_topic:
-        print(f"  topic: {channel_topic}")
     print("─" * max(len(header), 60))
-    for line in textwrap.wrap(text, width=90):
-        print("  " + line)
-    if attachments:
-        print(f"  📎 {', '.join(attachments)}")
-    if permalink:
-        print(f"  🔗 {permalink}")
+    for line in str(hit.get("text", "")).splitlines():
+        for wrapped in textwrap.wrap(line, width=90) or [""]:
+            print("  " + wrapped)
+    for link in hit.get("links") or []:
+        print(f"  link: {link}")
+    if hit.get("url"):
+        print(f"  from: {hit['url']}")
     print()
 
 
 def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
-    """Search the index and print the results; returns the process exit code."""
     from . import __version__
 
     parser = argparse.ArgumentParser(
-        prog="slack2rag query",
-        description="Semantic search over indexed Slack messages.",
+        prog="slack2rag query", description="Search the facts mined from Slack."
     )
     parser.add_argument(
         "-V", "--version", action="version", version=f"%(prog)s {__version__}"
     )
+    parser.add_argument("query", nargs="+", help="what to search for")
+    parser.add_argument("-n", "--limit", type=int, default=5, metavar="N")
+    parser.add_argument("-c", "--channel", metavar="NAME_OR_ID")
+    parser.add_argument("-k", "--kind", help="location, howto, policy, resource, ...")
     parser.add_argument(
-        "query",
-        nargs="+",
-        help="Search query (all positional args are joined into one query string)",
+        "--all", action="store_true", help="include superseded facts too"
     )
-    parser.add_argument(
-        "-n",
-        "--limit",
-        type=int,
-        default=5,
-        metavar="N",
-        help="Number of results to return (default: 5)",
-    )
-    parser.add_argument(
-        "-c",
-        "--channel",
-        default=None,
-        metavar="NAME_OR_ID",
-        help="Restrict results to a specific channel",
-    )
-    parser.add_argument(
-        "--date-from",
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Only return messages on or after this date",
-    )
-    parser.add_argument(
-        "--date-to",
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Only return messages on or before this date",
-    )
-    parser.add_argument(
-        "--no-score",
-        action="store_true",
-        help="Hide relevance score bars",
-    )
-
     args = parser.parse_args(argv)
-    query_text = " ".join(args.query)
-
+    text = " ".join(args.query)
     if cfg is None:
         cfg = Config.from_env()
 
@@ -137,45 +103,20 @@ def main(argv: list[str] | None = None, cfg: Config | None = None) -> int:
     except EmbeddingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-
-    sparse_encoder = SparseEncoder() if cfg.hybrid_search else None
-
     store = VectorStore(
-        url=cfg.qdrant_url,
-        collection=cfg.qdrant_collection,
-        dimension=embedder.dimension,
-        hybrid=cfg.hybrid_search,
+        cfg.qdrant_url, cfg.qdrant_collection, embedder.dimension, cfg.embedding_model
     )
-
-    print(f'\nSearching for: "{query_text}"')
-    if cfg.hybrid_search:
-        print("  (hybrid: dense + sparse)")
-    print()
-
-    vector = embedder.embed([query_text], kind="query")[0]
-    sparse_vector = sparse_encoder.encode([query_text])[0] if sparse_encoder else None
-
-    results = store.search(
-        query_vector=vector,
+    hits = store.search(
+        embedder.embed([text], kind="query")[0],
+        SparseEncoder().encode([text])[0],
         limit=args.limit,
-        channel_filter=args.channel,
-        date_from=args.date_from,
-        date_to=args.date_to,
+        flt=_filter(args.channel, args.kind, current=not args.all),
         score_threshold=cfg.score_threshold,
-        sparse_vector=sparse_vector,
     )
-
-    if not results:
+    print(f'\nSearching for: "{text}"\n')
+    if not hits:
         print("No results found.")
-        if cfg.score_threshold > 0:
-            print(
-                f"  (score threshold is set to {cfg.score_threshold} — try lowering it)"
-            )
         return 0
-
-    total = store.count()
-    print(f"Top {len(results)} of {total:,} indexed messages\n")
-
-    for idx, hit in enumerate(results):
-        _print_result(idx, hit, show_score=not args.no_score)
+    for index, hit in enumerate(hits):
+        _print_hit(index, hit)
     return 0

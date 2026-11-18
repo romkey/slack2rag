@@ -36,13 +36,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 CMD ["python", "-m", "slack2rag"]
 
 FROM base AS production
-# Numeric, so orchestrators can verify it isn't root. /data holds the sync
-# state (STATE_FILE) and /results the EVAL_TEST output; both are volumes
-# the app user must be able to write.
+# Numeric, so orchestrators can verify it isn't root. /data holds the weekly
+# reports (REPORT_DIR); it is a volume the app user must be able to write.
 RUN groupadd --system --gid 10001 app \
  && useradd --system --gid 10001 --uid 10001 --no-log-init --no-create-home app \
- && mkdir /data /results \
- && chown 10001:10001 /data /results
+ && mkdir /data \
+ && chown 10001:10001 /data
 COPY --from=build /venv /venv
 USER 10001:10001
 CMD ["slack2rag"]

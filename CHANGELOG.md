@@ -6,6 +6,65 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+slack2rag is now the Slack source of the hackerspace RAG pipeline: it
+mines Slack for facts instead of archiving it. Existing indexes are
+disposable; start the Qdrant collection and the database over.
+
+### Changed (breaking)
+
+- Messages are no longer indexed. Threads, sessions of unthreaded
+  messages, pinned messages and channel bookmarks are screened by a
+  relevance check, turned into standalone facts (kind, question, answer,
+  entities, links, confidence) by the chat model, checked for excluded
+  content (individuals, incidents, credentials, admin procedures,
+  access-path internals) and scrubbed of names, handles, emails and phone
+  numbers. Only the facts are stored and indexed.
+- Raw message text, user IDs and names are never stored. Migration 0002
+  drops the `slack_messages`, `slack_users` and old `slack_channels`
+  tables and adds the staging tables (units, facts, quarantine, cursors,
+  sync runs and status). User and team summaries, channel statistics and
+  `channel_stats.json` are gone.
+- PostgreSQL (`DATABASE_URL`) and a chat model (`CHAT_MODEL`, with
+  optional `CHAT_BASE_URL`/`CHAT_API_KEY`) are required. The production
+  compose file always runs `db` and `migrate`; the `postgres` profile is
+  gone.
+- The bot reads only public channels it has been invited to and never
+  joins one: `channels:join` is no longer used, and `SLACK_CHANNELS` is
+  retired. `SLACK_CHANNEL_BLACKLIST` is now `SLACK_CHANNEL_DENYLIST`. New
+  scopes: `pins:read`, `bookmarks:read` (see docs/slack-app.md).
+- The default collection is `hs_member`, with named dense and sparse
+  vectors, the shared payload schema (`source`, `doc_id`, `tier` member,
+  `authority` 1, `stale_after`, `superseded_by`, `sync_run_id`...) and the
+  embedding model recorded in its metadata. `hs_public` is refused.
+  `HYBRID_SEARCH` is retired: hybrid search is always on.
+- Eval mode (`EVAL_*`) and the decision model (`DECISION_*`) are replaced
+  by the relevance check and `slack2rag eval-classifier`.
+  `MIN_MESSAGE_LENGTH`, `REACTION_BOOST_THRESHOLD`,
+  `THREAD_UPDATE_LOOKBACK_HOURS` and `STATE_FILE` are retired too. Setting
+  any retired variable stops the app with a message naming its
+  replacement.
+- Logs go to stderr, so command output on stdout can be redirected.
+
+### Added
+
+- Live events over Socket Mode (`SLACK_APP_TOKEN`): edits and deletions
+  are reprocessed within a minute; leaving a channel deletes everything
+  derived from it.
+- An hourly catch-up, a nightly full reconcile (`RECONCILE_HOUR`) that
+  deletes what no run saw, with a safety valve when a run sees less than
+  half of the previous one, PostgreSQL advisory locks, and a status row.
+- Facts go stale by kind (status 7 days, announcement 30, location, howto
+  and contact 12 months), and a newer, highly similar fact supersedes an
+  older one (`SUPERSEDE_SIMILARITY`).
+- The channel directory (name, topic, purpose) is indexed.
+- A secret scanner with a quarantine log (channel and timestamp only).
+- Topics from the shared taxonomy (`TOPICS_FILE`).
+- A weekly wiki promotion report (`REPORT_WEEKDAY`, `REPORT_DIR`,
+  `slack2rag report`).
+- Commands: `status`, `reconcile`, `reprocess`, `report`,
+  `label-template`, `eval-classifier`, `spot-check` and `canary`.
+- docs/slack-app.md and a draft member notice, docs/member-notice.md.
+
 ## [0.6.0] - 2026-11-13
 
 The first published release with the 0.5.0 changes below: v0.5.0 was
