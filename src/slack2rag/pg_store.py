@@ -22,6 +22,7 @@ import psycopg
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
+from alembic.util import CommandError as AlembicCommandError
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -61,9 +62,28 @@ def head_revision() -> str:
     return head
 
 
+def known_revision(revision: str) -> bool:
+    """Whether this version of slack2rag ships the migration `revision`."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", "slack2rag:migrations")
+    try:
+        return ScriptDirectory.from_config(cfg).get_revision(revision) is not None
+    except AlembicCommandError:
+        return False
+
+
 def migrate(url: str) -> None:
-    """Bring the database schema up to date (`slack2rag migrate`)."""
-    alembic_command.upgrade(_alembic_config(url), "head")
+    """Bring the database schema up to date (`slack2rag migrate`).
+
+    Serialized with an advisory lock, so processes starting together
+    don't race to run the same migration.
+    """
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute("SELECT pg_advisory_lock(hashtext('slack2rag:migrate'))")
+        try:
+            alembic_command.upgrade(_alembic_config(url), "head")
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(hashtext('slack2rag:migrate'))")
     logger.info("PostgreSQL schema is at revision %s", head_revision())
 
 
@@ -182,14 +202,27 @@ class PgStore:
             row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
             return None if row is None else str(row["version_num"])
 
-    def check_schema(self) -> None:
+    def ensure_schema(self) -> None:
+        """Migrate the schema to this version's head if it is behind.
+
+        A schema newer than this version (after a downgrade) is refused,
+        not touched: SchemaError.
+        """
         revision = self.schema_revision()
         head = head_revision()
-        if revision != head:
+        if revision == head:
+            return
+        if revision is not None and not known_revision(revision):
             raise SchemaError(
-                f"PostgreSQL schema is at revision {revision or 'none'}, not "
-                f"{head}; run `slack2rag migrate` first"
+                f"PostgreSQL schema is at revision {revision}, newer than this "
+                f"version of slack2rag knows ({head}); upgrade slack2rag"
             )
+        logger.info(
+            "Migrating the PostgreSQL schema from revision %s to %s",
+            revision or "none",
+            head,
+        )
+        migrate(self._conninfo)
 
     @contextlib.contextmanager
     def lock(self, name: str = SOURCE) -> Iterator[bool]:

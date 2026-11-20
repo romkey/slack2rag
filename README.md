@@ -71,7 +71,7 @@ schema.
 ```
 slack2rag [--check]              the worker (same as `slack2rag run`)
 slack2rag query [options] TEXT   search the facts (-n N, -c CHANNEL, -k KIND, --all)
-slack2rag migrate                create or upgrade the PostgreSQL schema
+slack2rag migrate                create or upgrade the PostgreSQL schema (automatic on start)
 slack2rag status                 the last run: counts, quarantine size, errors
 slack2rag reconcile              run the nightly full reconcile now
 slack2rag reprocess              refetch and reprocess every unit on the next run
@@ -112,7 +112,7 @@ docker compose -f docker-compose.prod.yaml run --rm app slack2rag query "where i
 ```
 
 That runs the latest release from `ghcr.io/romkey/slack2rag` with
-PostgreSQL (migrated by the `migrate` service), Qdrant and the
+PostgreSQL (the app creates and upgrades its schema on start), Qdrant and the
 `embeddings` service; `APP_VERSION=X.Y.Z` pins a release. On ARM hosts set
 `TEI_IMAGE_TAG=cpu-arm64-1.9.4`. `COMPOSE_PROFILES=ollama` adds a local
 Ollama for the chat model (`CHAT_BASE_URL=http://ollama:11434/v1`).

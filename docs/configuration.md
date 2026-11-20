@@ -10,7 +10,7 @@ the app with a message naming the variable.
 | Variable | Meaning |
 |---|---|
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-…`). A user token (`xoxp-`) is refused. Scopes are listed in [slack-app.md](slack-app.md) |
-| `DATABASE_URL` | `postgresql://user:password@host:5432/db`, the staging store. Run `slack2rag migrate` before the first start and after upgrades; the app refuses to start on an out-of-date schema |
+| `DATABASE_URL` | `postgresql://user:password@host:5432/db`, the staging store. The app creates or upgrades the schema on start when it is behind (`slack2rag migrate` does it by hand); a schema newer than the running version, after a downgrade, is refused |
 | `CHAT_MODEL` | Chat-completions model that runs the relevance check, fact extraction and exclusion check |
 
 ## Slack

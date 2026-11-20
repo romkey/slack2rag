@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The PostgreSQL schema is migrated automatically on start: the worker
+  and every command that uses the database upgrade it when it is behind,
+  under an advisory lock so instances starting together don't race. A
+  schema newer than the running version (after a downgrade) is refused,
+  not touched. `slack2rag migrate` still works by hand.
+- `docker-compose.prod.yaml` no longer has a `migrate` service; the app
+  waits for `db` to be healthy instead.
+
 ## [0.7.0] - 2026-11-18
 
 slack2rag is now the Slack source of the hackerspace RAG pipeline: it
