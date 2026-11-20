@@ -153,10 +153,26 @@ class Pipeline:
     def process_dirty(self) -> RunCounts:
         return self._run("live")
 
-    def _run(self, kind: str) -> RunCounts:
+    def rebuild(self, reextract: bool = False) -> RunCounts:
+        """Rebuild this source's points in Qdrant, then catch up.
+
+        Deletes every Slack point and re-embeds every stored fact (no model
+        calls, and facts from messages Slack no longer shows are kept), then
+        re-indexes the channel directory. With *reextract*, every unit is
+        also refetched and run through the model again, as after
+        `slack2rag reprocess`.
+        """
+        return self._run("rebuild", reextract=reextract)
+
+    def _run(self, kind: str, reextract: bool = False) -> RunCounts:
         run = RunState(run_id=self.store.start_run(kind), kind=kind)
         status, message = "ok", ""
         try:
+            if kind == "rebuild":
+                self._reindex_all(run)
+                if reextract:
+                    count = self.store.mark_all_dirty()
+                    logger.info("Rebuild: reprocessing %d units", count)
             if kind == "live":
                 members = self.store.member_channel_ids()
                 self._channel_names = {
@@ -663,7 +679,7 @@ class Pipeline:
             run.seen_facts.extend(ids)
             if run.kind == "reconcile":
                 self.store.stamp_facts(ids, run.run_id)
-                self.vectors.set_payload(ids, {"sync_run_id": run.run_id})
+                self._restamp(ids, run)
 
     # ── indexing ─────────────────────────────────────────────────────────
 
@@ -675,10 +691,39 @@ class Pipeline:
         points = [(r.id, fact_payload(r, run.run_id)) for r in rows]
         vectors = self._upsert(points)
         run.seen_facts.extend([*fresh, *changes.unchanged])
-        if changes.unchanged:
-            self.vectors.set_payload(changes.unchanged, {"sync_run_id": run.run_id})
+        self._restamp(changes.unchanged, run)
         for row, dense in zip(rows, vectors, strict=True):
             self._supersede(row, dense)
+
+    def _restamp(self, ids: Sequence[str], run: RunState) -> None:
+        """Stamp unchanged facts' points with this run, writing back any
+        that are missing from Qdrant (a deleted or restored collection)."""
+        if not ids:
+            return
+        present = self.vectors.existing_ids(ids)
+        if present:
+            self.vectors.set_payload(
+                [i for i in ids if i in present], {"sync_run_id": run.run_id}
+            )
+        missing = [i for i in ids if i not in present]
+        if missing:
+            rows = self.store.facts(ids=missing)
+            self._upsert([(r.id, fact_payload(r, run.run_id)) for r in rows])
+            logger.warning("Wrote back %d facts missing from Qdrant", len(rows))
+
+    def _reindex_all(self, run: RunState) -> None:
+        """Delete every Slack point and re-embed every stored fact."""
+        self.vectors.delete_where(source_filter(SOURCE))
+        rows = self.store.facts()
+        ids = [r.id for r in rows]
+        self.store.stamp_facts(ids, run.run_id)
+        self._upsert([(r.id, fact_payload(r, run.run_id)) for r in rows])
+        run.seen_facts.extend(ids)
+        logger.info(
+            "Rebuild: deleted the Slack points in %s and re-embedded %d facts",
+            self.vectors.collection,
+            len(rows),
+        )
 
     def _upsert(
         self, points: Sequence[tuple[str, dict[str, Any]]]

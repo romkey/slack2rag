@@ -35,6 +35,10 @@ Jobs, each under a PostgreSQL advisory lock with a `sync_runs` row and the
   they are processed within a minute. Leaving or losing a channel deletes
   everything derived from it.
 - **report** (weekly): the wiki promotion queue.
+- **rebuild** (`slack2rag rebuild`, by hand): deletes every Slack point,
+  re-embeds every stored fact without the chat model, then catches up;
+  `--reextract` also runs every unit through the model again. Any run
+  that sees a stored fact whose point is missing writes it back.
 
 ## Stored
 

@@ -46,7 +46,7 @@ models, so the chat model usually needs `CHAT_BASE_URL`.
 | `TEI_IMAGE_TAG` | `cpu-1.9.4` | Compose files only: the TEI image tag. `cpu-arm64-1.9.4` on ARM hosts |
 | `TEI_MAX_BATCH_TOKENS` | `2048` | Compose files only: TEI's input limit in tokens |
 | `LLM_API_KEY` | *(empty)* | Optional Bearer token. OpenAI requires one (a warning is logged if it is missing) |
-| `EMBEDDING_MODEL` | `nomic-ai/modernbert-embed-base` | Embedding model. Recorded in the collection's metadata; a collection made with another model is refused until it is deleted and re-embedded |
+| `EMBEDDING_MODEL` | `nomic-ai/modernbert-embed-base` | Embedding model. Recorded in the collection's metadata; a collection made with another model is refused until it is deleted and re-embedded (`slack2rag rebuild`) |
 | `EMBEDDING_QUERY_PREFIX` | `search_query: ` | Put before search queries. Must match the model |
 | `EMBEDDING_DOCUMENT_PREFIX` | `search_document: ` | Put before every fact being indexed. Must match the model |
 | `EMBEDDING_CONTEXT_LENGTH` | `2048` | Longest input in tokens; longer ones are truncated. 0 disables |

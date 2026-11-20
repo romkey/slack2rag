@@ -7,7 +7,8 @@ slack2rag migrate                 create or upgrade the PostgreSQL schema (every
                                   command does this itself when it is behind)
 slack2rag status                  the last run, counts and quarantine size
 slack2rag reconcile               run the nightly full reconcile now
-slack2rag reprocess               mark every unit for reprocessing
+slack2rag reprocess               mark every unit to go through the model again
+slack2rag rebuild [--reextract]   rebuild the Slack points in Qdrant now
 slack2rag report                  print the wiki promotion queue
 slack2rag label-template [N]      JSONL of N units to hand-label (default 200)
 slack2rag eval-classifier FILE    score the relevance check on labeled units
@@ -112,6 +113,13 @@ def cmd_reprocess(cfg: Config, args: list[str]) -> int:
     return 0
 
 
+def cmd_rebuild(cfg: Config, args: list[str]) -> int:
+    if args not in ([], ["--reextract"]):
+        raise ValueError("takes only --reextract")
+    job = "rebuild-reextract" if args else "rebuild"
+    return 0 if worker.run_job(worker.build_pipeline(cfg), job) else 1
+
+
 def cmd_report(cfg: Config, args: list[str]) -> int:
     from slack2rag.report import promotion_candidates, render
 
@@ -175,6 +183,7 @@ COMMANDS: dict[str, Callable[[Config, list[str]], int]] = {
     "status": cmd_status,
     "reconcile": cmd_reconcile,
     "reprocess": cmd_reprocess,
+    "rebuild": cmd_rebuild,
     "report": cmd_report,
     "label-template": cmd_label_template,
     "eval-classifier": cmd_eval_classifier,
