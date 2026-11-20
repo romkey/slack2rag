@@ -1,6 +1,6 @@
 [project]
 name = "slack2rag"
-version = "0.7.0"
+version = "0.7.1"
 description = "Mine Slack channels for standalone facts and index them in Qdrant for RAG."
 readme = "README.md"
 license = "MIT"
