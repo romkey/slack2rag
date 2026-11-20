@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-20
+
 ### Changed
 
 - The PostgreSQL schema is migrated automatically on start: the worker
