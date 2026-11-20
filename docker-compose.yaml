@@ -19,9 +19,9 @@ services:
     build:
       context: .
       target: dev
-    # uv run re-syncs /venv if pyproject.toml or uv.lock changed. The schema
-    # migration is idempotent, so running it on every start is safe.
-    command: ["uv", "run", "--locked", "sh", "-c", "slack2rag migrate && slack2rag"]
+    # uv run re-syncs /venv if pyproject.toml or uv.lock changed. The app
+    # migrates the PostgreSQL schema itself on start.
+    command: ["uv", "run", "--locked", "slack2rag"]
     env_file:
       - path: .env
         required: false

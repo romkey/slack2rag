@@ -62,9 +62,12 @@ def make_chat(cfg: Config) -> ChatModel:
 
 
 def build_pipeline(cfg: Config, store: PgStore | None = None) -> Pipeline:
-    """Connect everything. Raises on a missing service or bad schema."""
+    """Connect everything, migrating the schema if it is behind.
+
+    Raises on a missing service or a schema newer than this version.
+    """
     store = store or PgStore(cfg.database_url)
-    store.check_schema()
+    store.ensure_schema()
     slack = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause)
     slack.identify()
     embedder = make_embedder(cfg)

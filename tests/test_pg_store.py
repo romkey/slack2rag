@@ -6,6 +6,7 @@ import datetime
 
 import psycopg
 import pytest
+from alembic import command as alembic_command
 
 from slack2rag.extractor import Fact, fact_id
 from slack2rag.pg_store import (
@@ -13,7 +14,9 @@ from slack2rag.pg_store import (
     PgStore,
     RunCounts,
     SchemaError,
+    _alembic_config,
     head_revision,
+    known_revision,
     migrate,
     sqlalchemy_url,
 )
@@ -51,16 +54,39 @@ def test_sqlalchemy_url() -> None:
     assert sqlalchemy_url("sqlite://") == "sqlite://"
 
 
-def test_schema_check(pg_url: str) -> None:
+def test_migrate_is_idempotent(pg_url: str) -> None:
     reset_database(pg_url)
     store = PgStore(pg_url)
     assert store.schema_revision() is None
-    with pytest.raises(SchemaError, match="revision none"):
-        store.check_schema()
     migrate(pg_url)
-    migrate(pg_url)  # idempotent
+    migrate(pg_url)
     assert store.schema_revision() == head_revision() == "0002"
-    store.check_schema()
+
+
+def test_ensure_schema_migrates_an_empty_or_older_database(pg_url: str) -> None:
+    reset_database(pg_url)
+    store = PgStore(pg_url)
+    store.ensure_schema()
+    assert store.schema_revision() == head_revision()
+    store.ensure_schema()  # already current: nothing to do
+    reset_database(pg_url)
+    alembic_command.upgrade(_alembic_config(pg_url), "0001")
+    assert store.schema_revision() == "0001"
+    store.ensure_schema()
+    assert store.schema_revision() == head_revision()
+    assert store.member_channel_ids() == set()
+
+
+def test_ensure_schema_refuses_a_newer_schema(pg_url: str) -> None:
+    reset_database(pg_url)
+    store = PgStore(pg_url)
+    migrate(pg_url)
+    with psycopg.connect(pg_url) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = '9999'")
+    assert not known_revision("9999")
+    with pytest.raises(SchemaError, match="newer than this version"):
+        store.ensure_schema()
+    assert store.schema_revision() == "9999"
 
 
 def test_no_column_can_hold_raw_text_or_user_ids(store: PgStore, pg_url: str) -> None:

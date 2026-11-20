@@ -3,7 +3,8 @@
 slack2rag [--check]               the worker (the default command)
 slack2rag run [--check]           the same, spelled out
 slack2rag query TEXT...           search the facts mined from Slack
-slack2rag migrate                 create or upgrade the PostgreSQL schema
+slack2rag migrate                 create or upgrade the PostgreSQL schema (every
+                                  command does this itself when it is behind)
 slack2rag status                  the last run, counts and quarantine size
 slack2rag reconcile               run the nightly full reconcile now
 slack2rag reprocess               mark every unit for reprocessing
@@ -59,6 +60,13 @@ def _out(text: str) -> None:
     sys.stdout.write(text if text.endswith("\n") else text + "\n")
 
 
+def _store(cfg: Config) -> PgStore:
+    """The staging store, migrated first if its schema is behind."""
+    store = PgStore(cfg.database_url)
+    store.ensure_schema()
+    return store
+
+
 def cmd_migrate(cfg: Config, args: list[str]) -> int:
     if args:
         raise ValueError("takes no arguments")
@@ -69,7 +77,7 @@ def cmd_migrate(cfg: Config, args: list[str]) -> int:
 def cmd_status(cfg: Config, args: list[str]) -> int:
     if args:
         raise ValueError("takes no arguments")
-    store = PgStore(cfg.database_url)
+    store = _store(cfg)
     status = store.status()
     if status is None:
         _out("No run has finished yet.")
@@ -99,7 +107,7 @@ def cmd_reconcile(cfg: Config, args: list[str]) -> int:
 def cmd_reprocess(cfg: Config, args: list[str]) -> int:
     if args:
         raise ValueError("takes no arguments")
-    count = PgStore(cfg.database_url).mark_all_dirty()
+    count = _store(cfg).mark_all_dirty()
     _out(f"{count} units will be refetched and reprocessed by the next run.")
     return 0
 
@@ -140,7 +148,7 @@ def cmd_spot_check(cfg: Config, args: list[str]) -> int:
     count = _count(args, 50)
     names = SlackClient(cfg.slack_bot_token, api_pause=cfg.api_pause).member_names()
     flagged = 0
-    for fact, problems in spot_check(PgStore(cfg.database_url), names, count):
+    for fact, problems in spot_check(_store(cfg), names, count):
         flagged += bool(problems)
         mark = "  !! " + "; ".join(problems) if problems else ""
         _out(f"[{fact.kind}] {fact.question}\n    {fact.answer}{mark}")
@@ -155,7 +163,7 @@ def cmd_canary(cfg: Config, args: list[str]) -> int:
 
     if not args:
         raise ValueError("takes one or more canary strings")
-    found = canaries(PgStore(cfg.database_url), QdrantClient(url=cfg.qdrant_url), args)
+    found = canaries(_store(cfg), QdrantClient(url=cfg.qdrant_url), args)
     for line in found:
         _out(line)
     _out("canary check: FAILED" if found else "canary check: passed")

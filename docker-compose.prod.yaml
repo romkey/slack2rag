@@ -1,5 +1,5 @@
 # Production: runs the released image from ghcr.io with PostgreSQL (the
-# staging store, migrated by the migrate service), Qdrant and a local
+# staging store; the app migrates its schema on start), Qdrant and a local
 # embedding server (Hugging Face Text Embeddings Inference, ModernBERT by
 # default). Configure it in .env next to this file (see .env.example and
 # docs/configuration.md); POSTGRES_* must match DATABASE_URL (host db).
@@ -47,8 +47,8 @@ services:
       ollama:
         condition: service_started
         required: false
-      migrate:
-        condition: service_completed_successfully
+      db:
+        condition: service_healthy
     volumes:
       - slack2rag_state:/data   # the weekly wiki promotion reports
     # Least privilege: nothing to write but /tmp and /data, no capabilities.
@@ -114,21 +114,6 @@ services:
     restart: unless-stopped
     volumes:
       - ollama_data:/root/.ollama
-
-  migrate:
-    image: ghcr.io/romkey/slack2rag:${APP_VERSION:-latest}
-    command: ["slack2rag", "migrate"]
-    env_file:
-      - path: .env
-        required: false
-    depends_on:
-      db:
-        condition: service_healthy
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
 
   db:
     image: postgres:18-trixie
