@@ -74,7 +74,8 @@ slack2rag query [options] TEXT   search the facts (-n N, -c CHANNEL, -k KIND, --
 slack2rag migrate                create or upgrade the PostgreSQL schema (automatic on start)
 slack2rag status                 the last run: counts, quarantine size, errors
 slack2rag reconcile              run the nightly full reconcile now
-slack2rag reprocess              refetch and reprocess every unit on the next run
+slack2rag reprocess              refetch every unit and run it through the model again, on the next run
+slack2rag rebuild [--reextract]  delete the Slack points and re-embed every stored fact now
 slack2rag report                 print the wiki promotion queue
 slack2rag label-template [N]     JSONL of N units (permalinks, no text) to hand-label
 slack2rag eval-classifier FILE   relevance-check misses and false keeps on labeled units
@@ -83,6 +84,25 @@ slack2rag canary STRING...       exit 1 if a planted string is in staging or any
 ```
 
 `--check` probes the embedding model, the chat model and the Slack token.
+
+### Rebuilding the index
+
+`slack2rag rebuild` deletes every Slack point from the collection (other
+sources' points are left alone), re-embeds every fact in PostgreSQL, then
+re-indexes the channel directory and catches up. It sends nothing to the
+chat model, so it is quick, and it keeps facts from messages Slack no
+longer shows (older than 90 days on the free plan). Use it after changing
+`EMBEDDING_MODEL` (delete the collection first) or if the collection was
+lost. `--reextract` also refetches every unit and runs it through the
+chat model again; that can take hours, so run it detached
+(`docker compose -f docker-compose.prod.yaml run -d --rm app slack2rag rebuild --reextract`).
+Facts in PostgreSQL missing from Qdrant are also written back by every
+run that sees them, so a nightly reconcile repairs a lost collection by
+itself.
+
+To start over completely instead, stop the app, delete the Slack points
+(or the collection, if nothing else uses it) and the PostgreSQL data, and
+start it again: it reads the history Slack still returns.
 
 ### Evaluation before trusting it
 

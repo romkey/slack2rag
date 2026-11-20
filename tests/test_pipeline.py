@@ -12,7 +12,7 @@ from slack2rag.config import PUBLIC_COLLECTION
 from slack2rag.evaluation import canaries
 from slack2rag.pg_store import PgStore
 from slack2rag.pipeline import Pipeline
-from slack2rag.vector_store import count_in_collection, source_filter
+from slack2rag.vector_store import Point, count_in_collection, source_filter
 
 from .conftest import DAY, Clock, FakeChat, FakeSlack, build
 
@@ -440,7 +440,7 @@ def test_reconcile_deletes_points_no_run_saw(
     pipeline.reconcile()
     pipeline.vectors.upsert(
         [
-            __import__("slack2rag.vector_store", fromlist=["Point"]).Point(
+            Point(
                 id="00000000-0000-0000-0000-000000000001",
                 dense=[1.0] + [0.0] * 63,
                 sparse={"indices": [1], "values": [1.0]},
@@ -599,3 +599,97 @@ def test_new_reply_to_old_thread_via_live_event(
 
     [fact] = _facts(qdrant)
     assert "Bench 3" in fact["text"]
+
+
+# ── rebuilding the index ──────────────────────────────────────────────────
+
+
+def _wipe_slack_points(qdrant: QdrantClient) -> None:
+    qdrant.delete("hs_member", points_selector=source_filter("slack"))
+
+
+def test_reconcile_writes_back_points_missing_from_qdrant(
+    pipeline: Pipeline, slack: FakeSlack, qdrant: QdrantClient, clock: Clock
+) -> None:
+    slack.post("C1", clock.now - OLD, "FACT howto|How to focus?|Use the gauge.")
+    pipeline.catchup()
+    before = {p["id"] for p in _points(qdrant)}
+    _wipe_slack_points(qdrant)
+
+    clock.now += DAY
+    pipeline.reconcile()
+
+    assert {p["id"] for p in _points(qdrant)} == before
+    [fact] = _facts(qdrant)
+    assert "gauge" in fact["text"]
+
+
+def test_rebuild_reembeds_stored_facts_without_the_model(
+    pipeline: Pipeline,
+    slack: FakeSlack,
+    chat: FakeChat,
+    store: PgStore,
+    qdrant: QdrantClient,
+    clock: Clock,
+) -> None:
+    slack.post("C1", clock.now - OLD, "FACT howto|How to focus?|Use the gauge.")
+    pipeline.catchup()
+    before = {p["id"]: p["text"] for p in _points(qdrant)}
+    _wipe_slack_points(qdrant)
+    chat.calls.clear()
+
+    pipeline.rebuild()
+
+    assert {p["id"]: p["text"] for p in _points(qdrant)} == before
+    assert chat.calls == []  # nothing was sent to the model again
+    run = store.last_run("rebuild")
+    assert run is not None
+    assert {p["sync_run_id"] for p in _points(qdrant)} == {run["id"]}
+
+
+def test_rebuild_drops_slack_points_staging_does_not_explain(
+    pipeline: Pipeline, slack: FakeSlack, qdrant: QdrantClient, clock: Clock
+) -> None:
+    slack.post("C1", clock.now - OLD, "FACT howto|How to focus?|Use the gauge.")
+    pipeline.catchup()
+    [fact] = _facts(qdrant)
+    orphan = dict(fact, doc_id="C9:1.0:0", channel_id="C9")
+    orphan.pop("id")
+    pipeline.vectors.upsert(
+        [
+            Point(
+                id="00000000-0000-0000-0000-000000000001",
+                dense=pipeline.embedder.embed(["orphan"])[0],
+                sparse=pipeline.sparse.encode(["orphan"])[0],
+                payload=orphan,
+            )
+        ]
+    )
+
+    pipeline.rebuild()
+
+    assert {p["channel_id"] for p in _points(qdrant)} == {"C1"}
+
+
+def test_rebuild_reextract_and_reprocess_rerun_the_model(
+    pipeline: Pipeline,
+    slack: FakeSlack,
+    chat: FakeChat,
+    store: PgStore,
+    qdrant: QdrantClient,
+    clock: Clock,
+) -> None:
+    slack.post("C1", clock.now - OLD, "FACT howto|How to focus?|Use the gauge.")
+    pipeline.catchup()
+    chat.calls.clear()
+
+    pipeline.rebuild(reextract=True)
+    assert "extraction" in chat.calls
+    [fact] = _facts(qdrant)
+    assert "gauge" in fact["text"]
+
+    chat.calls.clear()
+    store.mark_all_dirty()  # slack2rag reprocess
+    pipeline.catchup()
+    assert "extraction" in chat.calls
+    assert len(_facts(qdrant)) == 1

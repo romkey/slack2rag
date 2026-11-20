@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `slack2rag rebuild` deletes every Slack point from the collection,
+  re-embeds every fact stored in PostgreSQL (without the chat model, and
+  keeping facts from messages Slack no longer shows), re-indexes the
+  channel directory and catches up. `--reextract` also runs every unit
+  through the chat model again.
+
+### Fixed
+
+- A fact whose Qdrant point was missing (a deleted or restored
+  collection) is written back by the next run that sees it, instead of
+  the run failing on the missing point.
+- `slack2rag reprocess` now really runs every unit through the model
+  again; before, units whose messages hadn't changed were skipped.
+
 ## [0.7.1] - 2026-11-20
 
 ### Changed

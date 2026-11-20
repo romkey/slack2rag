@@ -147,6 +147,12 @@ def run_job(pipeline: Pipeline, job: str) -> bool:
                 pipeline.reconcile()
             elif job == "live":
                 pipeline.process_dirty()
+            elif job in ("rebuild", "rebuild-reextract"):
+                if job == "rebuild-reextract":
+                    pipeline.extractor.member_names = frozenset(
+                        pipeline.slack.member_names()
+                    )
+                pipeline.rebuild(reextract=job == "rebuild-reextract")
             elif job == "report":
                 write_report(
                     pipeline.store,

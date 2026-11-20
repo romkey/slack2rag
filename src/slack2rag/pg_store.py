@@ -464,9 +464,15 @@ class PgStore:
         return [self._unit_row(r) for r in rows]
 
     def mark_all_dirty(self) -> int:
-        """Reprocess everything (after a prompt or model change)."""
+        """Refetch every unit and run it through the model again.
+
+        Clearing the extractor version makes even an unchanged unit look
+        out of date, so it is extracted again rather than skipped.
+        """
         with self._conn() as conn:
-            cur = conn.execute("UPDATE slack_units SET dirty = TRUE")
+            cur = conn.execute(
+                "UPDATE slack_units SET dirty = TRUE, extractor_version = ''"
+            )
             return cur.rowcount
 
     def save_unit(

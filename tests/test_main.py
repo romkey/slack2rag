@@ -50,7 +50,14 @@ def test_run_job_each_kind(
 ) -> None:
     slack.post("C1", clock.now - 2 * DAY, "FACT howto|How?|Like this.")
     pipeline.cfg = make_config(report_dir=str(tmp_path))
-    for job in ("catchup", "reconcile", "live", "report"):
+    for job in (
+        "catchup",
+        "reconcile",
+        "live",
+        "report",
+        "rebuild",
+        "rebuild-reextract",
+    ):
         assert worker.run_job(pipeline, job)
     assert list(tmp_path.glob("wiki-promotion-*.md"))
 
@@ -259,6 +266,9 @@ def test_cli_pipeline_commands(
         assert "precision" in capsys.readouterr().out
         assert cli.main(["eval-classifier"]) == 2
         assert cli.main(["reconcile"]) == 0
+        assert cli.main(["rebuild"]) == 0
+        assert cli.main(["rebuild", "--reextract"]) == 0
+        assert cli.main(["rebuild", "--everything"]) == 2
         assert cli.main(["report", "x"]) == 2
     with patch("qdrant_client.QdrantClient", return_value=qdrant):
         assert cli.main(["canary", "NOT-THERE"]) == 0
